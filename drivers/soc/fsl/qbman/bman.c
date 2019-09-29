@@ -35,6 +35,27 @@
 
 /* Portal register assists */
 
+#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
+/* Cache-inhibited register offsets */
+#define BM_REG_RCR_PI_CINH	0x3000
+#define BM_REG_RCR_CI_CINH	0x3100
+#define BM_REG_RCR_ITR		0x3200
+#define BM_REG_CFG		0x3300
+#define BM_REG_SCN(n)		(0x3400 + ((n) << 6))
+#define BM_REG_ISR		0x3e00
+#define BM_REG_IER		0x3e40
+#define BM_REG_ISDR		0x3e80
+#define BM_REG_IIR		0x3ec0
+
+/* Cache-enabled register offsets */
+#define BM_CL_CR		0x0000
+#define BM_CL_RR0		0x0100
+#define BM_CL_RR1		0x0140
+#define BM_CL_RCR		0x1000
+#define BM_CL_RCR_PI_CENA	0x3000
+#define BM_CL_RCR_CI_CENA	0x3100
+
+#else
 /* Cache-inhibited register offsets */
 #define BM_REG_RCR_PI_CINH	0x0000
 #define BM_REG_RCR_CI_CINH	0x0004
@@ -53,6 +74,7 @@
 #define BM_CL_RCR		0x1000
 #define BM_CL_RCR_PI_CENA	0x3000
 #define BM_CL_RCR_CI_CENA	0x3100
+#endif
 
 /*
  * Portal modes.
@@ -538,11 +560,9 @@ static int bman_create_portal(struct bman_portal *portal,
 		dev_err(c->dev, "request_irq() failed\n");
 		goto fail_irq;
 	}
-	if (c->cpu != -1 && irq_can_set_affinity(c->irq) &&
-	    irq_set_affinity(c->irq, cpumask_of(c->cpu))) {
-		dev_err(c->dev, "irq_set_affinity() failed\n");
+
+	if (dpaa_set_portal_irq_affinity(c->dev, c->irq, c->cpu))
 		goto fail_affinity;
-	}
 
 	/* Need RCR to be empty before continuing */
 	ret = bm_rcr_get_fill(p);
@@ -607,36 +627,37 @@ int bman_p_irqsource_add(struct bman_portal *p, u32 bits)
 	unsigned long irqflags;
 
 	local_irq_save(irqflags);
-	set_bits(bits & BM_PIRQ_VISIBLE, &p->irq_sources);
+	p->irq_sources |= bits & BM_PIRQ_VISIBLE;
 	bm_out(&p->p, BM_REG_IER, p->irq_sources);
 	local_irq_restore(irqflags);
 	return 0;
 }
 
-static int bm_shutdown_pool(u32 bpid)
+int bm_shutdown_pool(u32 bpid)
 {
+	int err = 0;
 	struct bm_mc_command *bm_cmd;
 	union bm_mc_result *bm_res;
 
+
+	struct bman_portal *p = get_affine_portal();
 	while (1) {
-		struct bman_portal *p = get_affine_portal();
 		/* Acquire buffers until empty */
 		bm_cmd = bm_mc_start(&p->p);
 		bm_cmd->bpid = bpid;
 		bm_mc_commit(&p->p, BM_MCC_VERB_CMD_ACQUIRE | 1);
 		if (!bm_mc_result_timeout(&p->p, &bm_res)) {
-			put_affine_portal();
 			pr_crit("BMan Acquire Command timedout\n");
-			return -ETIMEDOUT;
+			err = -ETIMEDOUT;
+			goto done;
 		}
 		if (!(bm_res->verb & BM_MCR_VERB_ACQUIRE_BUFCOUNT)) {
-			put_affine_portal();
 			/* Pool is empty */
-			return 0;
+			goto done;
 		}
-		put_affine_portal();
 	}
-
+done:
+	put_affine_portal();
 	return 0;
 }
 

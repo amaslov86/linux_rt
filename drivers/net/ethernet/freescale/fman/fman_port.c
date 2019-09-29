@@ -1347,8 +1347,10 @@ int fman_port_config(struct fman_port *port, struct fman_port_params *params)
 	switch (port->port_type) {
 	case FMAN_PORT_TYPE_RX:
 		set_rx_dflt_cfg(port, params);
+		/* fall through */
 	case FMAN_PORT_TYPE_TX:
 		set_tx_dflt_cfg(port, params, &port->dts_params);
+		/* fall through */
 	default:
 		set_dflt_cfg(port, params);
 	}
@@ -1728,6 +1730,20 @@ u32 fman_port_get_qman_channel_id(struct fman_port *port)
 }
 EXPORT_SYMBOL(fman_port_get_qman_channel_id);
 
+/**
+ * fman_port_get_device
+ * port:	Pointer to the FMan port device
+ *
+ * Get the 'struct device' associated to the specified FMan port device
+ *
+ * Return: pointer to associated 'struct device'
+ */
+struct device *fman_port_get_device(struct fman_port *port)
+{
+	return port->dev;
+}
+EXPORT_SYMBOL(fman_port_get_device);
+
 int fman_port_get_hash_result_offset(struct fman_port *port, u32 *offset)
 {
 	if (port->buffer_offsets.hash_result_offset == ILLEGAL_BASE)
@@ -1738,6 +1754,18 @@ int fman_port_get_hash_result_offset(struct fman_port *port, u32 *offset)
 	return 0;
 }
 EXPORT_SYMBOL(fman_port_get_hash_result_offset);
+
+int fman_port_get_tstamp(struct fman_port *port, const void *data, u64 *tstamp)
+{
+	if (port->buffer_offsets.time_stamp_offset == ILLEGAL_BASE)
+		return -EINVAL;
+
+	*tstamp = be64_to_cpu(*(__be64 *)(data +
+			port->buffer_offsets.time_stamp_offset));
+
+	return 0;
+}
+EXPORT_SYMBOL(fman_port_get_tstamp);
 
 static int fman_port_probe(struct platform_device *of_dev)
 {

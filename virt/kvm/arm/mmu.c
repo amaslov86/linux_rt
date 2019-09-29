@@ -1027,9 +1027,11 @@ static int stage2_pmdp_test_and_clear_young(pmd_t *pmd)
  * @guest_ipa:	The IPA at which to insert the mapping
  * @pa:		The physical address of the device
  * @size:	The size of the mapping
+ * @prot:	S2 page translation bits
  */
 int kvm_phys_addr_ioremap(struct kvm *kvm, phys_addr_t guest_ipa,
-			  phys_addr_t pa, unsigned long size, bool writable)
+			  phys_addr_t pa, unsigned long size, bool writable,
+			  pgprot_t prot)
 {
 	phys_addr_t addr, end;
 	int ret = 0;
@@ -1040,7 +1042,7 @@ int kvm_phys_addr_ioremap(struct kvm *kvm, phys_addr_t guest_ipa,
 	pfn = __phys_to_pfn(pa);
 
 	for (addr = guest_ipa; addr < end; addr += PAGE_SIZE) {
-		pte_t pte = pfn_pte(pfn, PAGE_S2_DEVICE);
+		pte_t pte = pfn_pte(pfn, prot);
 
 		if (writable)
 			pte = kvm_s2pte_mkwrite(pte);
@@ -1064,12 +1066,42 @@ out:
 	return ret;
 }
 
+#ifdef CONFIG_ARM64
+static pgprot_t stage1_to_stage2_pgprot(pgprot_t prot)
+{
+	switch (pgprot_val(prot) & PTE_ATTRINDX_MASK) {
+		case PTE_ATTRINDX(MT_DEVICE_nGnRE):
+		case PTE_ATTRINDX(MT_DEVICE_nGnRnE):
+		case PTE_ATTRINDX(MT_DEVICE_GRE):
+			return PAGE_S2_DEVICE;
+		case PTE_ATTRINDX(MT_NORMAL_NC):
+		case PTE_ATTRINDX(MT_NORMAL):
+			return (pgprot_val(prot) & PTE_SHARED)
+				? PAGE_S2
+				: PAGE_S2_NS;
+	}
+
+	return PAGE_S2_DEVICE;
+}
+#else
+static pgprot_t stage1_to_stage2_pgprot(pgprot_t prot)
+{
+	return PAGE_S2_DEVICE;
+}
+#endif
+
 static bool transparent_hugepage_adjust(kvm_pfn_t *pfnp, phys_addr_t *ipap)
 {
 	kvm_pfn_t pfn = *pfnp;
 	gfn_t gfn = *ipap >> PAGE_SHIFT;
+	struct page *page = pfn_to_page(pfn);
 
-	if (PageTransCompoundMap(pfn_to_page(pfn))) {
+	/*
+	 * PageTransCompoungMap() returns true for THP and
+	 * hugetlbfs. Make sure the adjustment is done only for THP
+	 * pages.
+	 */
+	if (!PageHuge(page) && PageTransCompoundMap(page)) {
 		unsigned long mask;
 		/*
 		 * The address we faulted on is backed by a transparent huge
@@ -1334,6 +1366,20 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 		hugetlb = true;
 		gfn = (fault_ipa & PMD_MASK) >> PAGE_SHIFT;
 	} else {
+		if (!is_vm_hugetlb_page(vma)) {
+			pte_t *pte;
+			spinlock_t *ptl;
+			pgprot_t prot;
+
+			pte = get_locked_pte(current->mm, memslot->userspace_addr, &ptl);
+			prot = stage1_to_stage2_pgprot(__pgprot(pte_val(*pte)));
+			pte_unmap_unlock(pte, ptl);
+#ifdef CONFIG_ARM64
+			if (pgprot_val(prot) == pgprot_val(PAGE_S2_NS))
+				mem_type = PAGE_S2_NS;
+#endif
+		}
+
 		/*
 		 * Pages belonging to memslots that don't have the same
 		 * alignment for userspace and IPA cannot be mapped using
@@ -1375,6 +1421,11 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 	if (is_error_noslot_pfn(pfn))
 		return -EFAULT;
 
+#ifdef CONFIG_ARM64
+	if (pgprot_val(mem_type) == pgprot_val(PAGE_S2_NS)) {
+		flags |= KVM_S2PTE_FLAG_IS_IOMAP;
+	} else
+#endif
 	if (kvm_is_device_pfn(pfn)) {
 		mem_type = PAGE_S2_DEVICE;
 		flags |= KVM_S2PTE_FLAG_IS_IOMAP;
@@ -1911,6 +1962,9 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 			gpa_t gpa = mem->guest_phys_addr +
 				    (vm_start - mem->userspace_addr);
 			phys_addr_t pa;
+			pgprot_t prot;
+			pte_t *pte;
+			spinlock_t *ptl;
 
 			pa = (phys_addr_t)vma->vm_pgoff << PAGE_SHIFT;
 			pa += vm_start - vma->vm_start;
@@ -1921,9 +1975,13 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 				goto out;
 			}
 
+			pte = get_locked_pte(current->mm, mem->userspace_addr, &ptl);
+			prot = stage1_to_stage2_pgprot(__pgprot(pte_val(*pte)));
+			pte_unmap_unlock(pte, ptl);
+
 			ret = kvm_phys_addr_ioremap(kvm, gpa, pa,
 						    vm_end - vm_start,
-						    writable);
+						    writable, prot);
 			if (ret)
 				break;
 		}

@@ -1824,6 +1824,9 @@ struct xhci_hcd {
 #define XHCI_SLOW_SUSPEND	BIT_ULL(17)
 #define XHCI_SPURIOUS_WAKEUP	BIT_ULL(18)
 /* For controllers with a broken beyond repair streams implementation */
+#define XHCI_REVERSE_IN_OUT     BIT_ULL(32)
+#define XHCI_STOP_TRANSFER_IN_BLOCK   BIT_ULL(33)
+#define XHCI_STOP_EP_IN_U1     BIT_ULL(36)
 #define XHCI_BROKEN_STREAMS	BIT_ULL(19)
 #define XHCI_PME_STUCK_QUIRK	BIT_ULL(20)
 #define XHCI_MTK_HOST		BIT_ULL(21)
@@ -1840,6 +1843,7 @@ struct xhci_hcd {
 #define XHCI_INTEL_USB_ROLE_SW	BIT_ULL(31)
 #define XHCI_RESET_PLL_ON_DISCONNECT	BIT_ULL(34)
 #define XHCI_SNPS_BROKEN_SUSPEND    BIT_ULL(35)
+#define XHCI_DIS_U1U2_WHEN_U3 BIT_ULL(37)
 
 	unsigned int		num_active_eps;
 	unsigned int		limit_active_eps;

@@ -1,34 +1,6 @@
+/* SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause) */
 /* Copyright 2013-2016 Freescale Semiconductor Inc.
  * Copyright 2016 NXP
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- * * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- * * Redistributions in binary form must reproduce the above copyright
- * notice, this list of conditions and the following disclaimer in the
- * documentation and/or other materials provided with the distribution.
- * * Neither the name of the above-listed copyright holders nor the
- * names of any contributors may be used to endorse or promote products
- * derived from this software without specific prior written permission.
- *
- *
- * ALTERNATIVELY, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") as published by the Free Software
- * Foundation, either version 2 of that License or (at your option) any
- * later version.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 #ifndef _FSL_DPNI_CMD_H
 #define _FSL_DPNI_CMD_H
@@ -39,9 +11,11 @@
 #define DPNI_VER_MAJOR				7
 #define DPNI_VER_MINOR				0
 #define DPNI_CMD_BASE_VERSION			1
+#define DPNI_CMD_2ND_VERSION			2
 #define DPNI_CMD_ID_OFFSET			4
 
 #define DPNI_CMD(id)	(((id) << DPNI_CMD_ID_OFFSET) | DPNI_CMD_BASE_VERSION)
+#define DPNI_CMD_V2(id)	(((id) << DPNI_CMD_ID_OFFSET) | DPNI_CMD_2ND_VERSION)
 
 #define DPNI_CMDID_OPEN					DPNI_CMD(0x801)
 #define DPNI_CMDID_CLOSE				DPNI_CMD(0x800)
@@ -64,16 +38,18 @@
 #define DPNI_CMDID_GET_IRQ_STATUS			DPNI_CMD(0x016)
 #define DPNI_CMDID_CLEAR_IRQ_STATUS			DPNI_CMD(0x017)
 
-#define DPNI_CMDID_SET_POOLS				DPNI_CMD(0x200)
+#define DPNI_CMDID_SET_POOLS				DPNI_CMD_V2(0x200)
 #define DPNI_CMDID_SET_ERRORS_BEHAVIOR			DPNI_CMD(0x20B)
 
 #define DPNI_CMDID_GET_QDID				DPNI_CMD(0x210)
 #define DPNI_CMDID_GET_TX_DATA_OFFSET			DPNI_CMD(0x212)
 #define DPNI_CMDID_GET_LINK_STATE			DPNI_CMD(0x215)
+#define DPNI_CMDID_GET_LINK_STATE_V2			DPNI_CMD_V2(0x215)
 #define DPNI_CMDID_SET_MAX_FRAME_LENGTH			DPNI_CMD(0x216)
 #define DPNI_CMDID_GET_MAX_FRAME_LENGTH			DPNI_CMD(0x217)
 #define DPNI_CMDID_SET_LINK_CFG				DPNI_CMD(0x21A)
-#define DPNI_CMDID_SET_TX_SHAPING			DPNI_CMD(0x21B)
+#define DPNI_CMDID_SET_LINK_CFG_V2			DPNI_CMD_V2(0x21A)
+#define DPNI_CMDID_SET_TX_SHAPING			DPNI_CMD_V2(0x21B)
 
 #define DPNI_CMDID_SET_MCAST_PROMISC			DPNI_CMD(0x220)
 #define DPNI_CMDID_GET_MCAST_PROMISC			DPNI_CMD(0x221)
@@ -87,11 +63,16 @@
 
 #define DPNI_CMDID_SET_RX_TC_DIST			DPNI_CMD(0x235)
 
+#define DPNI_CMDID_SET_QOS_TBL				DPNI_CMD(0x240)
+#define DPNI_CMDID_ADD_QOS_ENT				DPNI_CMD(0x241)
+#define DPNI_CMDID_REMOVE_QOS_ENT			DPNI_CMD(0x242)
 #define DPNI_CMDID_ADD_FS_ENT				DPNI_CMD(0x244)
 #define DPNI_CMDID_REMOVE_FS_ENT			DPNI_CMD(0x245)
 #define DPNI_CMDID_CLR_FS_ENT				DPNI_CMD(0x246)
 
-#define DPNI_CMDID_GET_STATISTICS			DPNI_CMD(0x25D)
+#define DPNI_CMDID_SET_TX_PRIORITIES			DPNI_CMD_V2(0x250)
+#define DPNI_CMDID_GET_STATISTICS			DPNI_CMD_V2(0x25D)
+#define DPNI_CMDID_RESET_STATISTICS			DPNI_CMD(0x25E)
 #define DPNI_CMDID_GET_QUEUE				DPNI_CMD(0x25F)
 #define DPNI_CMDID_SET_QUEUE				DPNI_CMD(0x260)
 #define DPNI_CMDID_GET_TAILDROP				DPNI_CMD(0x261)
@@ -110,6 +91,9 @@
 #define DPNI_CMDID_GET_OFFLOAD				DPNI_CMD(0x26B)
 #define DPNI_CMDID_SET_OFFLOAD				DPNI_CMD(0x26C)
 
+#define DPNI_CMDID_SET_RX_FS_DIST			DPNI_CMD(0x273)
+#define DPNI_CMDID_SET_RX_HASH_DIST			DPNI_CMD(0x274)
+
 /* Macros for accessing command fields smaller than 1byte */
 #define DPNI_MASK(field)	\
 	GENMASK(DPNI_##field##_SHIFT + DPNI_##field##_SIZE - 1, \
@@ -126,13 +110,14 @@ struct dpni_cmd_open {
 
 #define DPNI_BACKUP_POOL(val, order)	(((val) & 0x1) << (order))
 struct dpni_cmd_set_pools {
-	/* cmd word 0 */
 	u8 num_dpbp;
 	u8 backup_pool_mask;
 	__le16 pad;
-	/* cmd word 0..4 */
-	__le32 dpbp_id[DPNI_MAX_DPBP];
-	/* cmd word 4..6 */
+	struct {
+		__le16 dpbp_id;
+		u8 priority_mask;
+		u8 pad;
+	} pool[DPNI_MAX_DPBP];
 	__le16 buffer_size[DPNI_MAX_DPBP];
 };
 
@@ -303,6 +288,7 @@ struct dpni_rsp_get_tx_data_offset {
 
 struct dpni_cmd_get_statistics {
 	u8 page_number;
+	u8 param;
 };
 
 struct dpni_rsp_get_statistics {
@@ -319,8 +305,22 @@ struct dpni_cmd_set_link_cfg {
 	__le64 options;
 };
 
+struct dpni_cmd_set_link_cfg_v2 {
+	/* cmd word 0 */
+	__le64 pad0;
+	/* cmd word 1 */
+	__le32 rate;
+	__le32 pad1;
+	/* cmd word 2 */
+	__le64 options;
+	/* cmd word 3 */
+	__le64 advertising;
+};
+
 #define DPNI_LINK_STATE_SHIFT		0
 #define DPNI_LINK_STATE_SIZE		1
+#define DPNI_STATE_VALID_SHIFT		1
+#define DPNI_STATE_VALID_SIZE		1
 
 struct dpni_rsp_get_link_state {
 	/* response word 0 */
@@ -333,6 +333,39 @@ struct dpni_rsp_get_link_state {
 	__le32 pad2;
 	/* response word 2 */
 	__le64 options;
+};
+
+struct dpni_rsp_get_link_state_v2 {
+	/* response word 0 */
+	__le32 pad0;
+	/* from LSB: up:1, valid:1 */
+	u8 flags;
+	u8 pad1[3];
+	/* response word 1 */
+	__le32 rate;
+	__le32 pad2;
+	/* response word 2 */
+	__le64 options;
+	/* cmd word 3 */
+	__le64 supported;
+	/* cmd word 4 */
+	__le64 advertising;
+};
+
+#define DPNI_COUPLED_SHIFT	0
+#define DPNI_COUPLED_SIZE	1
+
+struct dpni_cmd_set_tx_shaping {
+	/* cmd word 0 */
+	__le16 tx_cr_max_burst_size;
+	__le16 tx_er_max_burst_size;
+	__le32 pad;
+	/* cmd word 1 */
+	__le32 tx_cr_rate_limit;
+	__le32 tx_er_rate_limit;
+	/* cmd word 2 */
+	/* from LSB: coupled:1 */
+	u8 coupled;
 };
 
 struct dpni_cmd_set_max_frame_length {
@@ -392,6 +425,24 @@ struct dpni_cmd_remove_mac_addr {
 struct dpni_cmd_clear_mac_filters {
 	/* from LSB: unicast:1, multicast:1 */
 	u8 flags;
+};
+
+#define DPNI_SEPARATE_GRP_SHIFT 0
+#define DPNI_SEPARATE_GRP_SIZE  1
+#define DPNI_MODE_1_SHIFT		0
+#define DPNI_MODE_1_SIZE		4
+#define DPNI_MODE_2_SHIFT		4
+#define DPNI_MODE_2_SIZE		4
+
+struct dpni_cmd_set_tx_priorities {
+	__le16 flags;
+	u8 prio_group_A;
+	u8 prio_group_B;
+	__le32 pad0;
+	u8 modes[4];
+	__le32 pad1;
+	__le64 pad2;
+	__le16 delta_bandwidth[8];
 };
 
 #define DPNI_DIST_MODE_SHIFT		0
@@ -503,6 +554,63 @@ struct dpni_cmd_set_queue {
 	__le64 user_context;
 };
 
+#define DPNI_DISCARD_ON_MISS_SHIFT	0
+#define DPNI_DISCARD_ON_MISS_SIZE	1
+
+struct dpni_cmd_set_qos_table {
+	__le32 pad;
+	u8 default_tc;
+	/* only the LSB */
+	u8 discard_on_miss;
+	__le16 pad1[21];
+	__le64 key_cfg_iova;
+};
+
+struct dpni_cmd_add_qos_entry {
+	__le16 pad;
+	u8 tc_id;
+	u8 key_size;
+	__le16 index;
+	__le16 pad2;
+	__le64 key_iova;
+	__le64 mask_iova;
+};
+
+struct dpni_cmd_remove_qos_entry {
+	u8 pad1[3];
+	u8 key_size;
+	__le32 pad2;
+	__le64 key_iova;
+	__le64 mask_iova;
+};
+
+struct dpni_cmd_add_fs_entry {
+	/* cmd word 0 */
+	__le16 options;
+	u8 tc_id;
+	u8 key_size;
+	__le16 index;
+	__le16 flow_id;
+	/* cmd word 1 */
+	__le64 key_iova;
+	/* cmd word 2 */
+	__le64 mask_iova;
+	/* cmd word 3 */
+	__le64 flc;
+};
+
+struct dpni_cmd_remove_fs_entry {
+	/* cmd word 0 */
+	__le16 pad0;
+	u8 tc_id;
+	u8 key_size;
+	__le32 pad1;
+	/* cmd word 1 */
+	__le64 key_iova;
+	/* cmd word 2 */
+	__le64 mask_iova;
+};
+
 struct dpni_cmd_set_taildrop {
 	/* cmd word 0 */
 	u8 congestion_point;
@@ -536,6 +644,81 @@ struct dpni_rsp_get_taildrop {
 	u8 units;
 	u8 pad2;
 	__le32 threshold;
+};
+
+struct dpni_rsp_get_api_version {
+	u16 major;
+	u16 minor;
+};
+
+#define DPNI_DEST_TYPE_SHIFT		0
+#define DPNI_DEST_TYPE_SIZE		4
+#define DPNI_CONG_UNITS_SHIFT		4
+#define DPNI_CONG_UNITS_SIZE		2
+
+struct dpni_cmd_set_congestion_notification {
+	/* cmd word 0 */
+	u8 qtype;
+	u8 tc;
+	u8 pad[6];
+	/* cmd word 1 */
+	__le32 dest_id;
+	__le16 notification_mode;
+	u8 dest_priority;
+	/* from LSB: dest_type: 4 units:2 */
+	u8 type_units;
+	/* cmd word 2 */
+	__le64 message_iova;
+	/* cmd word 3 */
+	__le64 message_ctx;
+	/* cmd word 4 */
+	__le32 threshold_entry;
+	__le32 threshold_exit;
+};
+
+struct dpni_cmd_get_congestion_notification {
+	/* cmd word 0 */
+	u8 qtype;
+	u8 tc;
+};
+
+struct dpni_rsp_get_congestion_notification {
+	/* cmd word 0 */
+	__le64 pad;
+	/* cmd word 1 */
+	__le32 dest_id;
+	__le16 notification_mode;
+	u8 dest_priority;
+	/* from LSB: dest_type: 4 units:2 */
+	u8 type_units;
+	/* cmd word 2 */
+	__le64 message_iova;
+	/* cmd word 3 */
+	__le64 message_ctx;
+	/* cmd word 4 */
+	__le32 threshold_entry;
+	__le32 threshold_exit;
+};
+
+#define DPNI_RX_FS_DIST_ENABLE_SHIFT	0
+#define DPNI_RX_FS_DIST_ENABLE_SIZE	1
+struct dpni_cmd_set_rx_fs_dist {
+	__le16 dist_size;
+	u8 enable;
+	u8 tc;
+	__le16 miss_flow_id;
+	__le16 pad;
+	__le64 key_cfg_iova;
+};
+
+#define DPNI_RX_HASH_DIST_ENABLE_SHIFT	0
+#define DPNI_RX_HASH_DIST_ENABLE_SIZE	1
+struct dpni_cmd_set_rx_hash_dist {
+	__le16 dist_size;
+	u8 enable;
+	u8 tc;
+	__le32 pad;
+	__le64 key_cfg_iova;
 };
 
 #endif /* _FSL_DPNI_CMD_H */

@@ -20,6 +20,8 @@ obj-$(CONFIG_PCI)		+= pci/
 obj-$(CONFIG_PCI_ENDPOINT)	+= pci/endpoint/
 # PCI dwc controller drivers
 obj-y				+= pci/dwc/
+# PCI mobiveil controller drivers
+obj-y				+= pci/mobiveil/
 
 obj-$(CONFIG_PARISC)		+= parisc/
 obj-$(CONFIG_RAPIDIO)		+= rapidio/
@@ -130,6 +132,7 @@ obj-$(CONFIG_EISA)		+= eisa/
 obj-$(CONFIG_CPU_FREQ)		+= cpufreq/
 obj-$(CONFIG_CPU_IDLE)		+= cpuidle/
 obj-y				+= mmc/
+obj-y				+= mxc/
 obj-$(CONFIG_MEMSTICK)		+= memstick/
 obj-$(CONFIG_NEW_LEDS)		+= leds/
 obj-$(CONFIG_INFINIBAND)	+= infiniband/

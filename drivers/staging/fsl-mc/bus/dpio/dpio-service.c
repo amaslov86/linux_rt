@@ -1,36 +1,11 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
 /*
  * Copyright 2014-2016 Freescale Semiconductor Inc.
  * Copyright 2016 NXP
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *	 notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *	 notice, this list of conditions and the following disclaimer in the
- *	 documentation and/or other materials provided with the distribution.
- *     * Neither the name of Freescale Semiconductor nor the
- *	 names of its contributors may be used to endorse or promote products
- *	 derived from this software without specific prior written permission.
- *
- * ALTERNATIVELY, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") as published by the Free Software
- * Foundation, either version 2 of that License or (at your option) any
- * later version.
- *
- * THIS SOFTWARE IS PROVIDED BY Freescale Semiconductor ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL Freescale Semiconductor BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #include <linux/types.h>
-#include "../../include/mc.h"
+#include <linux/fsl/mc.h>
 #include "../../include/dpaa2-io.h"
 #include <linux/init.h>
 #include <linux/module.h>
@@ -43,7 +18,6 @@
 #include "qbman-portal.h"
 
 struct dpaa2_io {
-	atomic_t refs;
 	struct dpaa2_io_desc dpio_desc;
 	struct qbman_swp_desc swp_desc;
 	struct qbman_swp *swp;
@@ -53,6 +27,7 @@ struct dpaa2_io {
 	/* protect notifications list */
 	spinlock_t lock_notifications;
 	struct list_head notifications;
+	struct device *dev;
 };
 
 struct dpaa2_io_store {
@@ -83,7 +58,7 @@ static inline struct dpaa2_io *service_select_by_cpu(struct dpaa2_io *d,
 	 * If cpu == -1, choose the current cpu, with no guarantees about
 	 * potentially being migrated away.
 	 */
-	if (unlikely(cpu < 0))
+	if (cpu < 0)
 		cpu = smp_processor_id();
 
 	/* If a specific cpu was requested, pick it up immediately */
@@ -92,6 +67,10 @@ static inline struct dpaa2_io *service_select_by_cpu(struct dpaa2_io *d,
 
 static inline struct dpaa2_io *service_select(struct dpaa2_io *d)
 {
+	if (d)
+		return d;
+
+	d = service_select_by_cpu(d, -1);
 	if (d)
 		return d;
 
@@ -105,15 +84,34 @@ static inline struct dpaa2_io *service_select(struct dpaa2_io *d)
 }
 
 /**
+ * dpaa2_io_service_select() - return a dpaa2_io service affined to this cpu
+ * @cpu: the cpu id
+ *
+ * Return the affine dpaa2_io service, or NULL if there is no service affined
+ * to the specified cpu. If DPAA2_IO_ANY_CPU is used, return the next available
+ * service.
+ */
+struct dpaa2_io *dpaa2_io_service_select(int cpu)
+{
+	if (cpu == DPAA2_IO_ANY_CPU)
+		return service_select(NULL);
+
+	return service_select_by_cpu(NULL, cpu);
+}
+EXPORT_SYMBOL_GPL(dpaa2_io_service_select);
+
+/**
  * dpaa2_io_create() - create a dpaa2_io object.
  * @desc: the dpaa2_io descriptor
+ * @dev: the actual DPIO device
  *
  * Activates a "struct dpaa2_io" corresponding to the given config of an actual
  * DPIO object.
  *
  * Return a valid dpaa2_io object for success, or NULL for failure.
  */
-struct dpaa2_io *dpaa2_io_create(const struct dpaa2_io_desc *desc)
+struct dpaa2_io *dpaa2_io_create(const struct dpaa2_io_desc *desc,
+				 struct device *dev)
 {
 	struct dpaa2_io *obj = kmalloc(sizeof(*obj), GFP_KERNEL);
 
@@ -126,7 +124,6 @@ struct dpaa2_io *dpaa2_io_create(const struct dpaa2_io_desc *desc)
 		return NULL;
 	}
 
-	atomic_set(&obj->refs, 1);
 	obj->dpio_desc = *desc;
 	obj->swp_desc.cena_bar = obj->dpio_desc.regs_cena;
 	obj->swp_desc.cinh_bar = obj->dpio_desc.regs_cinh;
@@ -156,9 +153,10 @@ struct dpaa2_io *dpaa2_io_create(const struct dpaa2_io_desc *desc)
 		dpio_by_cpu[desc->cpu] = obj;
 	spin_unlock(&dpio_list_lock);
 
+	obj->dev = dev;
+
 	return obj;
 }
-EXPORT_SYMBOL(dpaa2_io_create);
 
 /**
  * dpaa2_io_down() - release the dpaa2_io object.
@@ -171,11 +169,8 @@ EXPORT_SYMBOL(dpaa2_io_create);
  */
 void dpaa2_io_down(struct dpaa2_io *d)
 {
-	if (!atomic_dec_and_test(&d->refs))
-		return;
 	kfree(d);
 }
-EXPORT_SYMBOL(dpaa2_io_down);
 
 #define DPAA_POLL_MAX 32
 
@@ -206,7 +201,7 @@ irqreturn_t dpaa2_io_irq(struct dpaa2_io *obj)
 			u64 q64;
 
 			q64 = qbman_result_SCN_ctx(dq);
-			ctx = (void *)q64;
+			ctx = (void *)(uintptr_t)q64;
 			ctx->cb(ctx);
 		} else {
 			pr_crit("fsl-mc-dpio: Unrecognised/ignored DQRR entry\n");
@@ -222,13 +217,19 @@ done:
 	qbman_swp_interrupt_set_inhibit(swp, 0);
 	return IRQ_HANDLED;
 }
-EXPORT_SYMBOL(dpaa2_io_irq);
+
+int dpaa2_io_get_cpu(struct dpaa2_io *d)
+{
+	return d->dpio_desc.cpu;
+}
+EXPORT_SYMBOL(dpaa2_io_get_cpu);
 
 /**
  * dpaa2_io_service_register() - Prepare for servicing of FQDAN or CDAN
  *                               notifications on the given DPIO service.
  * @d:   the given DPIO service.
  * @ctx: the notification context.
+ * @dev: the device that requests the register
  *
  * The caller should make the MC command to attach a DPAA2 object to
  * a DPIO after this function completes successfully.  In that way:
@@ -243,7 +244,8 @@ EXPORT_SYMBOL(dpaa2_io_irq);
  * Return 0 for success, or -ENODEV for failure.
  */
 int dpaa2_io_service_register(struct dpaa2_io *d,
-			      struct dpaa2_io_notification_ctx *ctx)
+			      struct dpaa2_io_notification_ctx *ctx,
+			      struct device *dev)
 {
 	unsigned long irqflags;
 
@@ -251,8 +253,10 @@ int dpaa2_io_service_register(struct dpaa2_io *d,
 	if (!d)
 		return -ENODEV;
 
+	device_link_add(dev, d->dev, DL_FLAG_AUTOREMOVE_SUPPLIER);
+
 	ctx->dpio_id = d->dpio_desc.dpio_id;
-	ctx->qman64 = (u64)ctx;
+	ctx->qman64 = (u64)(uintptr_t)ctx;
 	ctx->dpio_private = d;
 	spin_lock_irqsave(&d->lock_notifications, irqflags);
 	list_add(&ctx->node, &d->notifications);
@@ -263,20 +267,23 @@ int dpaa2_io_service_register(struct dpaa2_io *d,
 		return qbman_swp_CDAN_set_context_enable(d->swp,
 							 (u16)ctx->id,
 							 ctx->qman64);
+
 	return 0;
 }
-EXPORT_SYMBOL(dpaa2_io_service_register);
+EXPORT_SYMBOL_GPL(dpaa2_io_service_register);
 
 /**
  * dpaa2_io_service_deregister - The opposite of 'register'.
  * @service: the given DPIO service.
  * @ctx: the notification context.
+ * @dev: the device that requests to be deregistered
  *
  * This function should be called only after sending the MC command to
  * to detach the notification-producing device from the DPIO.
  */
 void dpaa2_io_service_deregister(struct dpaa2_io *service,
-				 struct dpaa2_io_notification_ctx *ctx)
+				 struct dpaa2_io_notification_ctx *ctx,
+				 struct device *dev)
 {
 	struct dpaa2_io *d = ctx->dpio_private;
 	unsigned long irqflags;
@@ -287,8 +294,10 @@ void dpaa2_io_service_deregister(struct dpaa2_io *service,
 	spin_lock_irqsave(&d->lock_notifications, irqflags);
 	list_del(&ctx->node);
 	spin_unlock_irqrestore(&d->lock_notifications, irqflags);
+
+	device_link_remove(dev, d->dev);
 }
-EXPORT_SYMBOL(dpaa2_io_service_deregister);
+EXPORT_SYMBOL_GPL(dpaa2_io_service_deregister);
 
 /**
  * dpaa2_io_service_rearm() - Rearm the notification for the given DPIO service.
@@ -322,7 +331,7 @@ int dpaa2_io_service_rearm(struct dpaa2_io *d,
 
 	return err;
 }
-EXPORT_SYMBOL(dpaa2_io_service_rearm);
+EXPORT_SYMBOL_GPL(dpaa2_io_service_rearm);
 
 /**
  * dpaa2_io_service_pull_fq() - pull dequeue functions from a fq.
@@ -385,7 +394,7 @@ int dpaa2_io_service_pull_channel(struct dpaa2_io *d, u32 channelid,
 
 	return err;
 }
-EXPORT_SYMBOL(dpaa2_io_service_pull_channel);
+EXPORT_SYMBOL_GPL(dpaa2_io_service_pull_channel);
 
 /**
  * dpaa2_io_service_enqueue_fq() - Enqueue a frame to a frame queue.
@@ -441,7 +450,7 @@ int dpaa2_io_service_enqueue_qd(struct dpaa2_io *d,
 
 	return qbman_swp_enqueue(d->swp, &ed, fd);
 }
-EXPORT_SYMBOL(dpaa2_io_service_enqueue_qd);
+EXPORT_SYMBOL_GPL(dpaa2_io_service_enqueue_qd);
 
 /**
  * dpaa2_io_service_release() - Release buffers to a buffer pool.
@@ -453,7 +462,7 @@ EXPORT_SYMBOL(dpaa2_io_service_enqueue_qd);
  * Return 0 for success, and negative error code for failure.
  */
 int dpaa2_io_service_release(struct dpaa2_io *d,
-			     u32 bpid,
+			     u16 bpid,
 			     const u64 *buffers,
 			     unsigned int num_buffers)
 {
@@ -468,7 +477,7 @@ int dpaa2_io_service_release(struct dpaa2_io *d,
 
 	return qbman_swp_release(d->swp, &rd, buffers, num_buffers);
 }
-EXPORT_SYMBOL(dpaa2_io_service_release);
+EXPORT_SYMBOL_GPL(dpaa2_io_service_release);
 
 /**
  * dpaa2_io_service_acquire() - Acquire buffers from a buffer pool.
@@ -482,7 +491,7 @@ EXPORT_SYMBOL(dpaa2_io_service_release);
  * Eg. if the buffer pool is empty, this will return zero.
  */
 int dpaa2_io_service_acquire(struct dpaa2_io *d,
-			     u32 bpid,
+			     u16 bpid,
 			     u64 *buffers,
 			     unsigned int num_buffers)
 {
@@ -499,7 +508,7 @@ int dpaa2_io_service_acquire(struct dpaa2_io *d,
 
 	return err;
 }
-EXPORT_SYMBOL(dpaa2_io_service_acquire);
+EXPORT_SYMBOL_GPL(dpaa2_io_service_acquire);
 
 /*
  * 'Stores' are reusable memory blocks for holding dequeue results, and to
@@ -553,7 +562,7 @@ struct dpaa2_io_store *dpaa2_io_store_create(unsigned int max_frames,
 
 	return ret;
 }
-EXPORT_SYMBOL(dpaa2_io_store_create);
+EXPORT_SYMBOL_GPL(dpaa2_io_store_create);
 
 /**
  * dpaa2_io_store_destroy() - Frees the dma memory storage for dequeue
@@ -567,7 +576,7 @@ void dpaa2_io_store_destroy(struct dpaa2_io_store *s)
 	kfree(s->alloced_addr);
 	kfree(s);
 }
-EXPORT_SYMBOL(dpaa2_io_store_destroy);
+EXPORT_SYMBOL_GPL(dpaa2_io_store_destroy);
 
 /**
  * dpaa2_io_store_next() - Determine when the next dequeue result is available.
@@ -610,9 +619,193 @@ struct dpaa2_dq *dpaa2_io_store_next(struct dpaa2_io_store *s, int *is_last)
 		if (!(dpaa2_dq_flags(ret) & DPAA2_DQ_STAT_VALIDFRAME))
 			ret = NULL;
 	} else {
+		prefetch(&s->vaddr[s->idx]);
 		*is_last = 0;
 	}
 
 	return ret;
 }
-EXPORT_SYMBOL(dpaa2_io_store_next);
+EXPORT_SYMBOL_GPL(dpaa2_io_store_next);
+
+/**
+ * dpaa2_io_query_fq_count() - Get the frame and byte count for a given fq.
+ * @d: the given DPIO object.
+ * @fqid: the id of frame queue to be queried.
+ * @fcnt: the queried frame count.
+ * @bcnt: the queried byte count.
+ *
+ * Knowing the FQ count at run-time can be useful in debugging situations.
+ * The instantaneous frame- and byte-count are hereby returned.
+ *
+ * Return 0 for a successful query, and negative error code if query fails.
+ */
+int dpaa2_io_query_fq_count(struct dpaa2_io *d, u32 fqid,
+			    u32 *fcnt, u32 *bcnt)
+{
+	struct qbman_fq_query_np_rslt state;
+	struct qbman_swp *swp;
+	unsigned long irqflags;
+	int ret;
+
+	d = service_select(d);
+	if (!d)
+		return -ENODEV;
+
+	swp = d->swp;
+	spin_lock_irqsave(&d->lock_mgmt_cmd, irqflags);
+	ret = qbman_fq_query_state(swp, fqid, &state);
+	spin_unlock_irqrestore(&d->lock_mgmt_cmd, irqflags);
+	if (ret)
+		return ret;
+	*fcnt = qbman_fq_state_frame_count(&state);
+	*bcnt = qbman_fq_state_byte_count(&state);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dpaa2_io_query_fq_count);
+
+/**
+ * dpaa2_io_query_bp_count() - Query the number of buffers currently in a
+ * buffer pool.
+ * @d: the given DPIO object.
+ * @bpid: the index of buffer pool to be queried.
+ * @num: the queried number of buffers in the buffer pool.
+ *
+ * Return 0 for a successful query, and negative error code if query fails.
+ */
+int dpaa2_io_query_bp_count(struct dpaa2_io *d, u16 bpid, u32 *num)
+{
+	struct qbman_bp_query_rslt state;
+	struct qbman_swp *swp;
+	unsigned long irqflags;
+	int ret;
+
+	d = service_select(d);
+	if (!d)
+		return -ENODEV;
+
+	swp = d->swp;
+	spin_lock_irqsave(&d->lock_mgmt_cmd, irqflags);
+	ret = qbman_bp_query(swp, bpid, &state);
+	spin_unlock_irqrestore(&d->lock_mgmt_cmd, irqflags);
+	if (ret)
+		return ret;
+	*num = qbman_bp_info_num_free_bufs(&state);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dpaa2_io_query_bp_count);
+
+/**
+ * dpaa2_io_service_enqueue_orp_fq() - Enqueue a frame to a frame queue with
+ * order restoration
+ * @d: the given DPIO service.
+ * @fqid: the given frame queue id.
+ * @fd: the frame descriptor which is enqueued.
+ * @orpid: the order restoration point ID
+ * @seqnum: the order sequence number
+ * @last: must be set for the final frame if seqnum is shared (spilt frame)
+ *
+ * Performs an enqueue to a frame queue using the specified order restoration
+ * point. The QMan device will ensure the order of frames placed on the
+ * queue will be ordered as per the sequence number.
+ *
+ * In the case a frame is split it is possible to enqueue using the same
+ * sequence number more than once. The final frame in a shared sequence number
+ * most be indicated by setting last = 1. For non shared sequence numbers
+ * last = 1 must always be set.
+ *
+ * Return 0 for successful enqueue, or -EBUSY if the enqueue ring is not ready,
+ * or -ENODEV if there is no dpio service.
+ */
+int dpaa2_io_service_enqueue_orp_fq(struct dpaa2_io *d, u32 fqid,
+				    const struct dpaa2_fd *fd, u16 orpid,
+				    u16 seqnum, int last)
+{
+	struct qbman_eq_desc ed;
+
+	d = service_select(d);
+	if (!d)
+		return -ENODEV;
+	qbman_eq_desc_clear(&ed);
+	qbman_eq_desc_set_orp(&ed, 0, orpid, seqnum, !last);
+	qbman_eq_desc_set_fq(&ed, fqid);
+	return qbman_swp_enqueue(d->swp, &ed, fd);
+}
+EXPORT_SYMBOL(dpaa2_io_service_enqueue_orp_fq);
+
+/**
+ * dpaa2_io_service_enqueue_orp_qd() - Enqueue a frame to a queueing destination
+ * with order restoration
+ * @d: the given DPIO service.
+ * @qdid: the given queuing destination id.
+ * @fd: the frame descriptor which is enqueued.
+ * @orpid: the order restoration point ID
+ * @seqnum: the order sequence number
+ * @last: must be set for the final frame if seqnum is shared (spilt frame)
+ *
+ * Performs an enqueue to a frame queue using the specified order restoration
+ * point. The QMan device will ensure the order of frames placed on the
+ * queue will be ordered as per the sequence number.
+ *
+ * In the case a frame is split it is possible to enqueue using the same
+ * sequence number more than once. The final frame in a shared sequence number
+ * most be indicated by setting last = 1. For non shared sequence numbers
+ * last = 1 must always be set.
+ *
+ * Return 0 for successful enqueue, or -EBUSY if the enqueue ring is not ready,
+ * or -ENODEV if there is no dpio service.
+ */
+int dpaa2_io_service_enqueue_orp_qd(struct dpaa2_io *d, u32 qdid, u8 prio,
+				    u16 qdbin, const struct dpaa2_fd *fd,
+				    u16 orpid, u16 seqnum, int last)
+{
+	struct qbman_eq_desc ed;
+
+	d = service_select(d);
+	if (!d)
+		return -ENODEV;
+	qbman_eq_desc_clear(&ed);
+	qbman_eq_desc_set_orp(&ed, 0, orpid, seqnum, !last);
+	qbman_eq_desc_set_qd(&ed, qdid, qdbin, prio);
+	return qbman_swp_enqueue(d->swp, &ed, fd);
+}
+EXPORT_SYMBOL_GPL(dpaa2_io_service_enqueue_orp_qd);
+
+/**
+ * dpaa2_io_service_orp_seqnum_drop() - Remove a sequence number from
+ * an order restoration list
+ * @d: the given DPIO service.
+ * @orpid: Order restoration point to remove a sequence number from
+ * @seqnum: Sequence number to remove
+ *
+ * Removes a frames sequence number from an order restoration point without
+ * enqueing the frame. Used to indicate that the order restoration hardware
+ * should not expect to see this sequence number. Typically used to indicate
+ * a frame was terminated or dropped from a flow.
+ *
+ * Return 0 for successful enqueue, or -EBUSY if the enqueue ring is not ready,
+ * or -ENODEV if there is no dpio service.
+ */
+int dpaa2_io_service_orp_seqnum_drop(struct dpaa2_io *d, u16 orpid, u16 seqnum)
+{
+	struct qbman_eq_desc ed;
+	struct dpaa2_fd fd;
+	unsigned long irqflags;
+	int ret;
+
+	d = service_select(d);
+	if (!d)
+		return -ENODEV;
+
+	if ((d->swp->desc->qman_version & QMAN_REV_MASK) >= QMAN_REV_5000) {
+		spin_lock_irqsave(&d->lock_mgmt_cmd, irqflags);
+		ret = qbman_orp_drop(d->swp, orpid, seqnum);
+		spin_unlock_irqrestore(&d->lock_mgmt_cmd, irqflags);
+		return ret;
+	}
+
+	qbman_eq_desc_clear(&ed);
+	qbman_eq_desc_set_orp_hole(&ed, orpid, seqnum);
+	return qbman_swp_enqueue(d->swp, &ed, &fd);
+}
+EXPORT_SYMBOL_GPL(dpaa2_io_service_orp_seqnum_drop);

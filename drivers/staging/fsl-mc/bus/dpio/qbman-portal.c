@@ -1,33 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
 /*
  * Copyright (C) 2014-2016 Freescale Semiconductor, Inc.
  * Copyright 2016 NXP
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- *     * Neither the name of Freescale Semiconductor nor the
- *       names of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written permission.
- *
- * ALTERNATIVELY, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") as published by the Free Software
- * Foundation, either version 2 of that License or (at your option) any
- * later version.
- *
- * THIS SOFTWARE IS PROVIDED BY Freescale Semiconductor ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL Freescale Semiconductor BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <asm/cacheflush.h>
@@ -37,23 +12,26 @@
 
 #include "qbman-portal.h"
 
-#define QMAN_REV_4000   0x04000000
-#define QMAN_REV_4100   0x04010000
-#define QMAN_REV_4101   0x04010001
-#define QMAN_REV_MASK   0xffff0000
-
 /* All QBMan command and result structures use this "valid bit" encoding */
 #define QB_VALID_BIT ((u32)0x80)
 
 /* QBMan portal management command codes */
 #define QBMAN_MC_ACQUIRE       0x30
 #define QBMAN_WQCHAN_CONFIGURE 0x46
+#define QBMAN_MC_ORP           0x63
 
 /* CINH register offsets */
+#define QBMAN_CINH_SWP_EQCR_PI      0x800
 #define QBMAN_CINH_SWP_EQAR    0x8c0
+#define QBMAN_CINH_SWP_CR_RT        0x900
+#define QBMAN_CINH_SWP_VDQCR_RT     0x940
+#define QBMAN_CINH_SWP_EQCR_AM_RT   0x980
+#define QBMAN_CINH_SWP_RCR_AM_RT    0x9c0
 #define QBMAN_CINH_SWP_DQPI    0xa00
 #define QBMAN_CINH_SWP_DCAP    0xac0
 #define QBMAN_CINH_SWP_SDQCR   0xb00
+#define QBMAN_CINH_SWP_EQCR_AM_RT2  0xb40
+#define QBMAN_CINH_SWP_RCR_PI       0xc00
 #define QBMAN_CINH_SWP_RAR     0xcc0
 #define QBMAN_CINH_SWP_ISR     0xe00
 #define QBMAN_CINH_SWP_IER     0xe40
@@ -67,6 +45,13 @@
 #define QBMAN_CENA_SWP_CR      0x600
 #define QBMAN_CENA_SWP_RR(vb)  (0x700 + ((u32)(vb) >> 1))
 #define QBMAN_CENA_SWP_VDQCR   0x780
+
+/* CENA register offsets in memory-backed mode */
+#define QBMAN_CENA_SWP_DQRR_MEM(n)  (0x800 + ((u32)(n) << 6))
+#define QBMAN_CENA_SWP_RCR_MEM(n)   (0x1400 + ((u32)(n) << 6))
+#define QBMAN_CENA_SWP_CR_MEM       0x1600
+#define QBMAN_CENA_SWP_RR_MEM       0x1680
+#define QBMAN_CENA_SWP_VDQCR_MEM    0x1780
 
 /* Reverse mapping of QBMAN_CENA_SWP_DQRR() */
 #define QBMAN_IDX_FROM_DQRR(p) (((unsigned long)(p) & 0x1ff) >> 6)
@@ -99,6 +84,14 @@ enum qbman_sdqcr_fc {
 	qbman_sdqcr_fc_up_to_3 = 1
 };
 
+#define dccvac(p) { asm volatile("dc cvac, %0;" : : "r" (p) : "memory"); }
+#define dcivac(p) { asm volatile("dc ivac, %0" : : "r"(p) : "memory"); }
+static inline void qbman_inval_prefetch(struct qbman_swp *p, uint32_t offset)
+{
+	dcivac(p->addr_cena + offset);
+	prefetch(p->addr_cena + offset);
+}
+
 /* Portal Access */
 
 static inline u32 qbman_read_register(struct qbman_swp *p, u32 offset)
@@ -121,10 +114,13 @@ static inline void *qbman_get_cmd(struct qbman_swp *p, u32 offset)
 
 #define SWP_CFG_DQRR_MF_SHIFT 20
 #define SWP_CFG_EST_SHIFT     16
+#define SWP_CFG_CPBS_SHIFT    15
 #define SWP_CFG_WN_SHIFT      14
 #define SWP_CFG_RPM_SHIFT     12
 #define SWP_CFG_DCM_SHIFT     10
 #define SWP_CFG_EPM_SHIFT     8
+#define SWP_CFG_VPM_SHIFT     7
+#define SWP_CFG_CPM_SHIFT     6
 #define SWP_CFG_SD_SHIFT      5
 #define SWP_CFG_SP_SHIFT      4
 #define SWP_CFG_SE_SHIFT      3
@@ -150,6 +146,8 @@ static inline u32 qbman_set_swp_cfg(u8 max_fill, u8 wn,	u8 est, u8 rpm, u8 dcm,
 		ep << SWP_CFG_EP_SHIFT);
 }
 
+#define QMAN_RT_MODE	   0x00000100
+
 /**
  * qbman_swp_init() - Create a functional object representing the given
  *                    QBMan portal descriptor.
@@ -171,6 +169,8 @@ struct qbman_swp *qbman_swp_init(const struct qbman_swp_desc *d)
 	p->sdq |= qbman_sdqcr_dct_prio_ics << QB_SDQCR_DCT_SHIFT;
 	p->sdq |= qbman_sdqcr_fc_up_to_3 << QB_SDQCR_FC_SHIFT;
 	p->sdq |= QMAN_SDQCR_TOKEN << QB_SDQCR_TOK_SHIFT;
+	if ((p->desc->qman_version & QMAN_REV_MASK) >= QMAN_REV_5000)
+		p->mr.valid_bit = QB_VALID_BIT;
 
 	atomic_set(&p->vdq.available, 1);
 	p->vdq.valid_bit = QB_VALID_BIT;
@@ -188,8 +188,11 @@ struct qbman_swp *qbman_swp_init(const struct qbman_swp_desc *d)
 	p->addr_cena = d->cena_bar;
 	p->addr_cinh = d->cinh_bar;
 
+	if ((p->desc->qman_version & QMAN_REV_MASK) >= QMAN_REV_5000)
+		memset(p->addr_cena, 0, 64 * 1024);
+
 	reg = qbman_set_swp_cfg(p->dqrr.dqrr_size,
-				1, /* Writes Non-cacheable */
+				0, /* Writes cacheable */
 				0, /* EQCR_CI stashing threshold */
 				3, /* RPM: Valid bit mode, RCR in array mode */
 				2, /* DCM: Discrete consumption ack mode */
@@ -200,6 +203,10 @@ struct qbman_swp *qbman_swp_init(const struct qbman_swp_desc *d)
 				1, /* dequeue stashing priority == TRUE */
 				0, /* dequeue stashing enable == FALSE */
 				0); /* EQCR_CI stashing priority == FALSE */
+	if ((p->desc->qman_version & QMAN_REV_MASK) >= QMAN_REV_5000)
+		reg |= 1 << SWP_CFG_CPBS_SHIFT | /* memory-backed mode */
+		       1 << SWP_CFG_VPM_SHIFT |  /* VDQCR read triggered mode */
+		       1 << SWP_CFG_CPM_SHIFT;   /* CR read triggered mode */
 
 	qbman_write_register(p, QBMAN_CINH_SWP_CFG, reg);
 	reg = qbman_read_register(p, QBMAN_CINH_SWP_CFG);
@@ -208,6 +215,10 @@ struct qbman_swp *qbman_swp_init(const struct qbman_swp_desc *d)
 		return NULL;
 	}
 
+	if ((p->desc->qman_version & QMAN_REV_MASK) >= QMAN_REV_5000) {
+		qbman_write_register(p, QBMAN_CINH_SWP_EQCR_PI, QMAN_RT_MODE);
+		qbman_write_register(p, QBMAN_CINH_SWP_RCR_PI, QMAN_RT_MODE);
+	}
 	/*
 	 * SDQCR needs to be initialized to 0 when no channels are
 	 * being dequeued from or else the QMan HW will indicate an
@@ -302,7 +313,10 @@ void qbman_swp_interrupt_set_inhibit(struct qbman_swp *p, int inhibit)
  */
 void *qbman_swp_mc_start(struct qbman_swp *p)
 {
-	return qbman_get_cmd(p, QBMAN_CENA_SWP_CR);
+	if ((p->desc->qman_version & QMAN_REV_MASK) < QMAN_REV_5000)
+		return qbman_get_cmd(p, QBMAN_CENA_SWP_CR);
+	else
+		return qbman_get_cmd(p, QBMAN_CENA_SWP_CR_MEM);
 }
 
 /*
@@ -313,8 +327,15 @@ void qbman_swp_mc_submit(struct qbman_swp *p, void *cmd, u8 cmd_verb)
 {
 	u8 *v = cmd;
 
-	dma_wmb();
-	*v = cmd_verb | p->mc.valid_bit;
+	if ((p->desc->qman_version & QMAN_REV_MASK) < QMAN_REV_5000) {
+		dma_wmb();
+		*v = cmd_verb | p->mc.valid_bit;
+		dccvac(cmd);
+	} else {
+		*v = cmd_verb | p->mc.valid_bit;
+		dma_wmb();
+		qbman_write_register(p, QBMAN_CINH_SWP_CR_RT, QMAN_RT_MODE);
+	}
 }
 
 /*
@@ -325,13 +346,28 @@ void *qbman_swp_mc_result(struct qbman_swp *p)
 {
 	u32 *ret, verb;
 
-	ret = qbman_get_cmd(p, QBMAN_CENA_SWP_RR(p->mc.valid_bit));
+	if ((p->desc->qman_version & QMAN_REV_MASK) < QMAN_REV_5000) {
+		qbman_inval_prefetch(p, QBMAN_CENA_SWP_RR(p->mc.valid_bit));
+		ret = qbman_get_cmd(p, QBMAN_CENA_SWP_RR(p->mc.valid_bit));
+		/* Remove the valid-bit - command completed if the rest
+		 * is non-zero.
+		 */
+		verb = ret[0] & ~QB_VALID_BIT;
+		if (!verb)
+			return NULL;
+		p->mc.valid_bit ^= QB_VALID_BIT;
+	} else {
+		ret = qbman_get_cmd(p, QBMAN_CENA_SWP_RR_MEM);
+		/* Command completed if the valid bit is toggled */
+		if (p->mr.valid_bit != (ret[0] & QB_VALID_BIT))
+			return NULL;
+		/* Command completed if the rest is non-zero */
+		verb = ret[0] & ~QB_VALID_BIT;
+		if (!verb)
+			return NULL;
+		p->mr.valid_bit ^= QB_VALID_BIT;
+	}
 
-	/* Remove the valid-bit - command completed if the rest is non-zero */
-	verb = ret[0] & ~QB_VALID_BIT;
-	if (!verb)
-		return NULL;
-	p->mc.valid_bit ^= QB_VALID_BIT;
 	return ret;
 }
 
@@ -368,6 +404,43 @@ void qbman_eq_desc_set_no_orp(struct qbman_eq_desc *d, int respond_success)
 		d->verb |= enqueue_response_always;
 	else
 		d->verb |= enqueue_rejects_to_fq;
+}
+
+/**
+ * qbman_eq_desc_set_orp() - Set order-restoration in the enqueue descriptor
+ * @d: the enqueue descriptor.
+ * @response_success: 1 = enqueue with response always; 0 = enqueue with
+ * rejections returned on a FQ.
+ * @oprid: the order point record id.
+ * @seqnum: the order restoration sequence number.
+ * @incomplete: indicates whether this is the last fragments using the same
+ * sequence number.
+ */
+void qbman_eq_desc_set_orp(struct qbman_eq_desc *d, int respond_success,
+			   u16 oprid, u16 seqnum, int incomplete)
+{
+	d->verb |= (1 << QB_ENQUEUE_CMD_ORP_ENABLE_SHIFT);
+	if (respond_success)
+		d->verb |= enqueue_response_always;
+	else
+		d->verb |= enqueue_rejects_to_fq;
+	d->orpid = cpu_to_le16(oprid);
+	d->seqnum = cpu_to_le16((!!incomplete << 14) | seqnum);
+}
+
+/**
+ * qbman_eq_desc_set_orp_hole() - fill a hole in the order-restoration sequence
+ * without any enqueue
+ * @d: the enqueue descriptor.
+ * @oprid: the order point record id.
+ * @seqnum: the order restoration sequence number.
+ */
+void qbman_eq_desc_set_orp_hole(struct qbman_eq_desc *d, u16 oprid,
+				u16 seqnum)
+{
+	d->verb |= (1 << QB_ENQUEUE_CMD_ORP_ENABLE_SHIFT) | enqueue_empty;
+	d->orpid = cpu_to_le16(oprid);
+	d->seqnum = cpu_to_le16(seqnum);
 }
 
 /*
@@ -408,6 +481,18 @@ void qbman_eq_desc_set_qd(struct qbman_eq_desc *d, u32 qdid,
 #define EQAR_VB(eqar)      ((eqar) & 0x80)
 #define EQAR_SUCCESS(eqar) ((eqar) & 0x100)
 
+static inline void qbman_write_eqcr_am_rt_register(struct qbman_swp *p,
+						   u8 idx)
+{
+	if (idx < 16)
+		qbman_write_register(p, QBMAN_CINH_SWP_EQCR_AM_RT + idx * 4,
+				     QMAN_RT_MODE);
+	else
+		qbman_write_register(p, QBMAN_CINH_SWP_EQCR_AM_RT2 +
+				     (idx - 16) * 4,
+				     QMAN_RT_MODE);
+}
+
 /**
  * qbman_swp_enqueue() - Issue an enqueue command
  * @s:  the software portal used for enqueue
@@ -429,12 +514,29 @@ int qbman_swp_enqueue(struct qbman_swp *s, const struct qbman_eq_desc *d,
 		return -EBUSY;
 
 	p = qbman_get_cmd(s, QBMAN_CENA_SWP_EQCR(EQAR_IDX(eqar)));
-	memcpy(&p->dca, &d->dca, 31);
+	/* This is mapped as DEVICE type memory, writes are
+	 * with address alignment:
+	 * desc.dca address alignment = 1
+	 * desc.seqnum address alignment = 2
+	 * desc.orpid address alignment = 4
+	 * desc.tgtid address alignment = 8
+	 */
+	p->dca = d->dca;
+	p->seqnum = d->seqnum;
+	p->orpid = d->orpid;
+	memcpy(&p->tgtid, &d->tgtid, 24);
 	memcpy(&p->fd, fd, sizeof(*fd));
 
-	/* Set the verb byte, have to substitute in the valid-bit */
-	dma_wmb();
-	p->verb = d->verb | EQAR_VB(eqar);
+	if ((s->desc->qman_version & QMAN_REV_MASK) < QMAN_REV_5000) {
+		/* Set the verb byte, have to substitute in the valid-bit */
+		dma_wmb();
+		p->verb = d->verb | EQAR_VB(eqar);
+		dccvac(p);
+	} else {
+		p->verb = d->verb | EQAR_VB(eqar);
+		dma_wmb();
+		qbman_write_eqcr_am_rt_register(s, EQAR_IDX(eqar));
+	}
 
 	return 0;
 }
@@ -522,7 +624,7 @@ void qbman_pull_desc_set_storage(struct qbman_pull_desc *d,
 				 int stash)
 {
 	/* save the virtual address */
-	d->rsp_addr_virt = (u64)storage;
+	d->rsp_addr_virt = (u64)(uintptr_t)storage;
 
 	if (!storage) {
 		d->verb &= ~(1 << QB_VDQCR_VERB_RLS_SHIFT);
@@ -615,18 +717,28 @@ int qbman_swp_pull(struct qbman_swp *s, struct qbman_pull_desc *d)
 		atomic_inc(&s->vdq.available);
 		return -EBUSY;
 	}
-	s->vdq.storage = (void *)d->rsp_addr_virt;
-	p = qbman_get_cmd(s, QBMAN_CENA_SWP_VDQCR);
+	s->vdq.storage = (void *)(uintptr_t)d->rsp_addr_virt;
+	if ((s->desc->qman_version & QMAN_REV_MASK) < QMAN_REV_5000)
+		p = qbman_get_cmd(s, QBMAN_CENA_SWP_VDQCR);
+	else
+		p = qbman_get_cmd(s, QBMAN_CENA_SWP_VDQCR_MEM);
 	p->numf = d->numf;
 	p->tok = QMAN_DQ_TOKEN_VALID;
 	p->dq_src = d->dq_src;
 	p->rsp_addr = d->rsp_addr;
 	p->rsp_addr_virt = d->rsp_addr_virt;
-	dma_wmb();
-
-	/* Set the verb byte, have to substitute in the valid-bit */
-	p->verb = d->verb | s->vdq.valid_bit;
-	s->vdq.valid_bit ^= QB_VALID_BIT;
+	if ((s->desc->qman_version & QMAN_REV_MASK) < QMAN_REV_5000) {
+		dma_wmb();
+		/* Set the verb byte, have to substitute in the valid-bit */
+		p->verb = d->verb | s->vdq.valid_bit;
+		s->vdq.valid_bit ^= QB_VALID_BIT;
+		dccvac(p);
+	} else {
+		p->verb = d->verb | s->vdq.valid_bit;
+		s->vdq.valid_bit ^= QB_VALID_BIT;
+		dma_wmb();
+		qbman_write_register(s, QBMAN_CINH_SWP_VDQCR_RT, QMAN_RT_MODE);
+	}
 
 	return 0;
 }
@@ -680,11 +792,13 @@ const struct dpaa2_dq *qbman_swp_dqrr_next(struct qbman_swp *s)
 				 s->dqrr.next_idx, pi);
 			s->dqrr.reset_bug = 0;
 		}
-		prefetch(qbman_get_cmd(s,
-				       QBMAN_CENA_SWP_DQRR(s->dqrr.next_idx)));
+		qbman_inval_prefetch(s,	QBMAN_CENA_SWP_DQRR(s->dqrr.next_idx));
 	}
 
-	p = qbman_get_cmd(s, QBMAN_CENA_SWP_DQRR(s->dqrr.next_idx));
+	if ((s->desc->qman_version & QMAN_REV_MASK) < QMAN_REV_5000)
+		p = qbman_get_cmd(s, QBMAN_CENA_SWP_DQRR(s->dqrr.next_idx));
+	else
+		p = qbman_get_cmd(s, QBMAN_CENA_SWP_DQRR_MEM(s->dqrr.next_idx));
 	verb = p->dq.verb;
 
 	/*
@@ -696,8 +810,7 @@ const struct dpaa2_dq *qbman_swp_dqrr_next(struct qbman_swp *s)
 	 * knew from reading PI.
 	 */
 	if ((verb & QB_VALID_BIT) != s->dqrr.valid_bit) {
-		prefetch(qbman_get_cmd(s,
-				       QBMAN_CENA_SWP_DQRR(s->dqrr.next_idx)));
+		qbman_inval_prefetch(s, QBMAN_CENA_SWP_DQRR(s->dqrr.next_idx));
 		return NULL;
 	}
 	/*
@@ -720,7 +833,7 @@ const struct dpaa2_dq *qbman_swp_dqrr_next(struct qbman_swp *s)
 	    (flags & DPAA2_DQ_STAT_EXPIRED))
 		atomic_inc(&s->vdq.available);
 
-	prefetch(qbman_get_cmd(s, QBMAN_CENA_SWP_DQRR(s->dqrr.next_idx)));
+	qbman_inval_prefetch(s, QBMAN_CENA_SWP_DQRR(s->dqrr.next_idx));
 
 	return p;
 }
@@ -836,18 +949,29 @@ int qbman_swp_release(struct qbman_swp *s, const struct qbman_release_desc *d,
 		return -EBUSY;
 
 	/* Start the release command */
-	p = qbman_get_cmd(s, QBMAN_CENA_SWP_RCR(RAR_IDX(rar)));
+	if ((s->desc->qman_version & QMAN_REV_MASK) < QMAN_REV_5000)
+		p = qbman_get_cmd(s, QBMAN_CENA_SWP_RCR(RAR_IDX(rar)));
+	else
+		p = qbman_get_cmd(s, QBMAN_CENA_SWP_RCR_MEM(RAR_IDX(rar)));
 	/* Copy the caller's buffer pointers to the command */
 	for (i = 0; i < num_buffers; i++)
 		p->buf[i] = cpu_to_le64(buffers[i]);
 	p->bpid = d->bpid;
 
-	/*
-	 * Set the verb byte, have to substitute in the valid-bit and the number
-	 * of buffers.
-	 */
-	dma_wmb();
-	p->verb = d->verb | RAR_VB(rar) | num_buffers;
+	if ((s->desc->qman_version & QMAN_REV_MASK) < QMAN_REV_5000) {
+		/*
+		 * Set the verb byte, have to substitute in the valid-bit
+		 * and the number of buffers.
+		 */
+		dma_wmb();
+		p->verb = d->verb | RAR_VB(rar) | num_buffers;
+		dccvac(p);
+	} else {
+		p->verb = d->verb | RAR_VB(rar) | num_buffers;
+		dma_wmb();
+		qbman_write_register(s, QBMAN_CINH_SWP_RCR_AM_RT +
+				     RAR_IDX(rar)  * 4, QMAN_RT_MODE);
+	}
 
 	return 0;
 }
@@ -855,7 +979,7 @@ int qbman_swp_release(struct qbman_swp *s, const struct qbman_release_desc *d,
 struct qbman_acquire_desc {
 	u8 verb;
 	u8 reserved;
-	u16 bpid;
+	__le16 bpid;
 	u8 num;
 	u8 reserved2[59];
 };
@@ -863,10 +987,10 @@ struct qbman_acquire_desc {
 struct qbman_acquire_rslt {
 	u8 verb;
 	u8 rslt;
-	u16 reserved;
+	__le16 reserved;
 	u8 num;
 	u8 reserved2[3];
-	u64 buf[7];
+	__le64 buf[7];
 };
 
 /**
@@ -929,7 +1053,7 @@ int qbman_swp_acquire(struct qbman_swp *s, u16 bpid, u64 *buffers,
 struct qbman_alt_fq_state_desc {
 	u8 verb;
 	u8 reserved[3];
-	u32 fqid;
+	__le32 fqid;
 	u8 reserved2[56];
 };
 
@@ -952,7 +1076,7 @@ int qbman_swp_alt_fq_state(struct qbman_swp *s, u32 fqid,
 	if (!p)
 		return -EBUSY;
 
-	p->fqid = cpu_to_le32(fqid) & ALT_FQ_FQID_MASK;
+	p->fqid = cpu_to_le32(fqid & ALT_FQ_FQID_MASK);
 
 	/* Complete the management command */
 	r = qbman_swp_mc_complete(s, p, alt_fq_verb);
@@ -978,11 +1102,11 @@ int qbman_swp_alt_fq_state(struct qbman_swp *s, u32 fqid,
 struct qbman_cdan_ctrl_desc {
 	u8 verb;
 	u8 reserved;
-	u16 ch;
+	__le16 ch;
 	u8 we;
 	u8 ctrl;
-	u16 reserved2;
-	u64 cdan_ctx;
+	__le16 reserved2;
+	__le64 cdan_ctx;
 	u8 reserved3[48];
 
 };
@@ -990,7 +1114,7 @@ struct qbman_cdan_ctrl_desc {
 struct qbman_cdan_ctrl_rslt {
 	u8 verb;
 	u8 rslt;
-	u16 ch;
+	__le16 ch;
 	u8 reserved[60];
 };
 
@@ -1028,6 +1152,153 @@ int qbman_swp_CDAN_set(struct qbman_swp *s, u16 channelid,
 	if (unlikely(r->rslt != QBMAN_MC_RSLT_OK)) {
 		pr_err("qbman: CDAN cQID %d failed: code = 0x%02x\n",
 		       channelid, r->rslt);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+#define QBMAN_RESPONSE_VERB_MASK	0x7f
+#define QBMAN_FQ_QUERY_NP		0x45
+#define QBMAN_BP_QUERY			0x32
+
+struct qbman_fq_query_desc {
+	u8 verb;
+	u8 reserved[3];
+	__le32 fqid;
+	u8 reserved2[56];
+};
+
+int qbman_fq_query_state(struct qbman_swp *s, u32 fqid,
+			 struct qbman_fq_query_np_rslt *r)
+{
+	struct qbman_fq_query_desc *p;
+	void *resp;
+
+	p = (struct qbman_fq_query_desc *)qbman_swp_mc_start(s);
+	if (!p)
+		return -EBUSY;
+
+	/* FQID is a 24 bit value */
+	p->fqid = cpu_to_le32(fqid & 0x00FFFFFF);
+	resp = qbman_swp_mc_complete(s, p, QBMAN_FQ_QUERY_NP);
+	if (!resp) {
+		pr_err("qbman: Query FQID %d NP fields failed, no response\n",
+		       fqid);
+		return -EIO;
+	}
+	*r = *(struct qbman_fq_query_np_rslt *)resp;
+	/* Decode the outcome */
+	WARN_ON((r->verb & QBMAN_RESPONSE_VERB_MASK) != QBMAN_FQ_QUERY_NP);
+
+	/* Determine success or failure */
+	if (r->rslt != QBMAN_MC_RSLT_OK) {
+		pr_err("Query NP fields of FQID 0x%x failed, code=0x%02x\n",
+		       p->fqid, r->rslt);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+u32 qbman_fq_state_frame_count(const struct qbman_fq_query_np_rslt *r)
+{
+	return (le32_to_cpu(r->frm_cnt) & 0x00FFFFFF);
+}
+
+u32 qbman_fq_state_byte_count(const struct qbman_fq_query_np_rslt *r)
+{
+	return le32_to_cpu(r->byte_cnt);
+}
+
+struct qbman_bp_query_desc {
+	u8 verb;
+	u8 reserved;
+	__le16 bpid;
+	u8 reserved2[60];
+};
+
+int qbman_bp_query(struct qbman_swp *s, u16 bpid,
+		   struct qbman_bp_query_rslt *r)
+{
+	struct qbman_bp_query_desc *p;
+	void *resp;
+
+	p = (struct qbman_bp_query_desc *)qbman_swp_mc_start(s);
+	if (!p)
+		return -EBUSY;
+
+	p->bpid = cpu_to_le16(bpid);
+	resp = qbman_swp_mc_complete(s, p, QBMAN_BP_QUERY);
+	if (!resp) {
+		pr_err("qbman: Query BPID %d fields failed, no response\n",
+		       bpid);
+		return -EIO;
+	}
+	*r = *(struct qbman_bp_query_rslt *)resp;
+	/* Decode the outcome */
+	WARN_ON((r->verb & QBMAN_RESPONSE_VERB_MASK) != QBMAN_BP_QUERY);
+
+	/* Determine success or failure */
+	if (r->rslt != QBMAN_MC_RSLT_OK) {
+		pr_err("Query fields of BPID 0x%x failed, code=0x%02x\n",
+		       bpid, r->rslt);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+u32 qbman_bp_info_num_free_bufs(struct qbman_bp_query_rslt *a)
+{
+	return le32_to_cpu(a->fill);
+}
+
+struct qbman_orp_cmd_desc {
+	u8 verb;
+	u8 reserved;
+	u8 cid;
+	u8 reserved2;
+	u16 orpid;
+	u16 seqnum;
+	u8 reserved3[56];
+};
+
+struct qbman_orp_cmd_rslt {
+	u8 verb;
+	u8 rslt;
+	u8 cid;
+	u8 reserved1[61];
+};
+
+int qbman_orp_drop(struct qbman_swp *s, u16 orpid, u16 seqnum)
+{
+	struct qbman_orp_cmd_desc *p;
+	struct qbman_orp_cmd_rslt *r;
+	void *resp;
+
+	p = (struct qbman_orp_cmd_desc *)qbman_swp_mc_start(s);
+	if (!p)
+		return -EBUSY;
+
+	p->cid = 0x7;
+	p->orpid = cpu_to_le16(orpid);
+	p->seqnum = cpu_to_le16(seqnum);
+
+	resp = qbman_swp_mc_complete(s, p, QBMAN_MC_ORP);
+	if (!resp) {
+		pr_err("qbman: Drop sequence num %d orpid 0x%x failed, no response\n",
+		       seqnum, orpid);
+		return -EIO;
+	}
+	r = (struct qbman_orp_cmd_rslt *)resp;
+	/* Decode the outcome */
+	WARN_ON((r->verb & QBMAN_RESPONSE_VERB_MASK) != QBMAN_MC_ORP);
+
+	/* Determine success or failure */
+	if (r->rslt != QBMAN_MC_RSLT_OK) {
+		pr_err("Drop seqnum %d of prpid 0x%x failed, code=0x%02x\n",
+		       seqnum, orpid, r->rslt);
 		return -EIO;
 	}
 

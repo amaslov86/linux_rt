@@ -79,6 +79,7 @@ enum {
 	NETIF_F_HW_ESP_BIT,		/* Hardware ESP transformation offload */
 	NETIF_F_HW_ESP_TX_CSUM_BIT,	/* ESP with TX checksum offload */
 	NETIF_F_RX_UDP_TUNNEL_PORT_BIT, /* Offload of RX port for UDP tunnels */
+	NETIF_F_HW_ACCEL_MQ_BIT,	/* Hardware-accelerated multiqueue */
 
 	/*
 	 * Add your fresh new feature above and remember to update
@@ -144,6 +145,7 @@ enum {
 #define NETIF_F_HW_ESP		__NETIF_F(HW_ESP)
 #define NETIF_F_HW_ESP_TX_CSUM	__NETIF_F(HW_ESP_TX_CSUM)
 #define	NETIF_F_RX_UDP_TUNNEL_PORT  __NETIF_F(RX_UDP_TUNNEL_PORT)
+#define NETIF_F_HW_ACCEL_MQ	__NETIF_F(HW_ACCEL_MQ)
 
 /* Finds the next feature with the highest number of the range of start till 0.
  */

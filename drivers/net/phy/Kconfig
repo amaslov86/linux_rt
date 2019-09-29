@@ -87,6 +87,18 @@ config MDIO_BUS_MUX_MMIOREG
 
 	  Currently, only 8/16/32 bits registers are supported.
 
+config MDIO_BUS_MUX_MULTIPLEXER
+	tristate "MDIO bus multiplexer using kernel multiplexer subsystem"
+	depends on OF
+	select MULTIPLEXER
+	select MDIO_BUS_MUX
+	help
+	  This module provides a driver for MDIO bus multiplexer
+	  that is controlled via the kernel multiplexer subsystem. The
+	  bus multiplexer connects one of several child MDIO busses to
+	  a parent bus.  Child bus selection is under the control of
+	  the kernel multiplexer subsystem.
+
 config MDIO_CAVIUM
 	tristate
 
@@ -220,6 +232,16 @@ config AT803X_PHY
 	---help---
 	  Currently supports the AT8030 and AT8035 model
 
+config AT803X_PHY_SMART_EEE
+	depends on AT803X_PHY
+	default n
+	tristate "SmartEEE feature for AT803X PHYs"
+	---help---
+	  Enables the Atheros SmartEEE feature (not IEEE 802.3az). When 2 PHYs
+	  which support this feature are connected back-to-back, they may
+	  negotiate a low-power sleep mode autonomously, without the Ethernet
+	  controller's knowledge.  May cause packet loss.
+
 config BCM63XX_PHY
 	tristate "Broadcom 63xx SOCs internal PHY"
 	depends on BCM63XX
@@ -301,6 +323,11 @@ config ICPLUS_PHY
 	tristate "ICPlus PHYs"
 	---help---
 	  Currently supports the IP175C and IP1001 PHYs.
+
+config INPHI_PHY
+	tristate "Inphi CDR 10G/25G Ethernet PHY"
+	---help---
+	  Currently supports the IN112525_S03 part @ 25G
 
 config INTEL_XWAY_PHY
 	tristate "Intel XWAY PHYs"

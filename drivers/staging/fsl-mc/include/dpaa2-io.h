@@ -1,33 +1,8 @@
+/* SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause) */
 /*
  * Copyright 2014-2016 Freescale Semiconductor Inc.
- * Copyright NXP
+ * Copyright 2017 NXP
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- *     * Neither the name of Freescale Semiconductor nor the
- *       names of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written permission.
- *
- * ALTERNATIVELY, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") as published by the Free Software
- * Foundation, either version 2 of that License or (at your option) any
- * later version.
- *
- * THIS SOFTWARE IS PROVIDED BY Freescale Semiconductor ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL Freescale Semiconductor BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #ifndef __FSL_DPAA2_IO_H
 #define __FSL_DPAA2_IO_H
@@ -77,16 +52,19 @@ struct dpaa2_io_desc {
 	int has_8prio;
 	int cpu;
 	void *regs_cena;
-	void *regs_cinh;
+	void __iomem *regs_cinh;
 	int dpio_id;
 	u32 qman_version;
 };
 
-struct dpaa2_io *dpaa2_io_create(const struct dpaa2_io_desc *desc);
+struct dpaa2_io *dpaa2_io_create(const struct dpaa2_io_desc *desc,
+				 struct device *dev);
 
 void dpaa2_io_down(struct dpaa2_io *d);
 
 irqreturn_t dpaa2_io_irq(struct dpaa2_io *obj);
+
+struct dpaa2_io *dpaa2_io_service_select(int cpu);
 
 /**
  * struct dpaa2_io_notification_ctx - The DPIO notification context structure
@@ -103,7 +81,7 @@ irqreturn_t dpaa2_io_irq(struct dpaa2_io *obj);
  * Used when a FQDAN/CDAN registration is made by drivers.
  */
 struct dpaa2_io_notification_ctx {
-	void (*cb)(struct dpaa2_io_notification_ctx *);
+	void (*cb)(struct dpaa2_io_notification_ctx *ctx);
 	int is_cdan;
 	u32 id;
 	int desired_cpu;
@@ -113,10 +91,14 @@ struct dpaa2_io_notification_ctx {
 	void *dpio_private;
 };
 
+int dpaa2_io_get_cpu(struct dpaa2_io *d);
+
 int dpaa2_io_service_register(struct dpaa2_io *service,
-			      struct dpaa2_io_notification_ctx *ctx);
+			      struct dpaa2_io_notification_ctx *ctx,
+			      struct device *dev);
 void dpaa2_io_service_deregister(struct dpaa2_io *service,
-				 struct dpaa2_io_notification_ctx *ctx);
+				 struct dpaa2_io_notification_ctx *ctx,
+				 struct device *dev);
 int dpaa2_io_service_rearm(struct dpaa2_io *service,
 			   struct dpaa2_io_notification_ctx *ctx);
 
@@ -129,14 +111,74 @@ int dpaa2_io_service_enqueue_fq(struct dpaa2_io *d, u32 fqid,
 				const struct dpaa2_fd *fd);
 int dpaa2_io_service_enqueue_qd(struct dpaa2_io *d, u32 qdid, u8 prio,
 				u16 qdbin, const struct dpaa2_fd *fd);
-int dpaa2_io_service_release(struct dpaa2_io *d, u32 bpid,
+int dpaa2_io_service_release(struct dpaa2_io *d, u16 bpid,
 			     const u64 *buffers, unsigned int num_buffers);
-int dpaa2_io_service_acquire(struct dpaa2_io *d, u32 bpid,
+int dpaa2_io_service_acquire(struct dpaa2_io *d, u16 bpid,
 			     u64 *buffers, unsigned int num_buffers);
 
 struct dpaa2_io_store *dpaa2_io_store_create(unsigned int max_frames,
 					     struct device *dev);
 void dpaa2_io_store_destroy(struct dpaa2_io_store *s);
 struct dpaa2_dq *dpaa2_io_store_next(struct dpaa2_io_store *s, int *is_last);
+
+/* Order Restoration Support */
+int dpaa2_io_service_enqueue_orp_fq(struct dpaa2_io *d, u32 fqid,
+				    const struct dpaa2_fd *fd, u16 orpid,
+				    u16 seqnum, int last);
+
+int dpaa2_io_service_enqueue_orp_qd(struct dpaa2_io *d, u32 qdid, u8 prio,
+				    u16 qdbin, const struct dpaa2_fd *fd,
+				    u16 orpid, u16 seqnum, int last);
+
+int dpaa2_io_service_orp_seqnum_drop(struct dpaa2_io *d, u16 orpid,
+				     u16 seqnum);
+
+/***************/
+/* CSCN        */
+/***************/
+
+/**
+ * struct dpaa2_cscn - The CSCN message format
+ * @verb: identifies the type of message (should be 0x27).
+ * @stat: status bits related to dequeuing response (not used)
+ * @state: bit 0 = 0/1 if CG is no/is congested
+ * @reserved: reserved byte
+ * @cgid: congest grp ID - the first 16 bits
+ * @ctx: context data
+ *
+ * Congestion management can be implemented in software through
+ * the use of Congestion State Change Notifications (CSCN). These
+ * are messages written by DPAA2 hardware to memory whenever the
+ * instantaneous count (I_CNT field in the CG) exceeds the
+ * Congestion State (CS) entrance threshold, signifying congestion
+ * entrance, or when the instantaneous count returns below exit
+ * threshold, signifying congestion exit. The format of the message
+ * is given by the dpaa2_cscn structure. Bit 0 of the state field
+ * represents congestion state written by the hardware.
+ */
+struct dpaa2_cscn {
+	u8 verb;
+	u8 stat;
+	u8 state;
+	u8 reserved;
+	__le32 cgid;
+	__le64 ctx;
+};
+
+#define DPAA2_CSCN_SIZE                        64
+#define DPAA2_CSCN_ALIGN               16
+
+#define DPAA2_CSCN_STATE_MASK          0x1
+#define DPAA2_CSCN_CONGESTED           1
+
+static inline bool dpaa2_cscn_state_congested(struct dpaa2_cscn *cscn)
+{
+	return ((cscn->state & DPAA2_CSCN_STATE_MASK) == DPAA2_CSCN_CONGESTED);
+}
+
+int dpaa2_io_query_fq_count(struct dpaa2_io *d, u32 fqid,
+			    u32 *fcnt, u32 *bcnt);
+int dpaa2_io_query_bp_count(struct dpaa2_io *d, u16 bpid,
+			    u32 *num);
 
 #endif /* __FSL_DPAA2_IO_H */

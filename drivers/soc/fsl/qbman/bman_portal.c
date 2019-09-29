@@ -32,6 +32,7 @@
 
 static struct bman_portal *affine_bportals[NR_CPUS];
 static struct cpumask portal_cpus;
+static int __bman_portals_probed;
 /* protect bman global registers and global data shared among portals */
 static DEFINE_SPINLOCK(bman_lock);
 
@@ -65,7 +66,9 @@ static int bman_offline_cpu(unsigned int cpu)
 	if (!pcfg)
 		return 0;
 
-	irq_set_affinity(pcfg->irq, cpumask_of(0));
+	/* use any other online CPU */
+	cpu = cpumask_any_but(cpu_online_mask, cpu);
+	irq_set_affinity(pcfg->irq, cpumask_of(cpu));
 	return 0;
 }
 
@@ -85,6 +88,12 @@ static int bman_online_cpu(unsigned int cpu)
 	return 0;
 }
 
+int bman_portals_probed(void)
+{
+	return __bman_portals_probed;
+}
+EXPORT_SYMBOL_GPL(bman_portals_probed);
+
 static int bman_portal_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -92,11 +101,21 @@ static int bman_portal_probe(struct platform_device *pdev)
 	struct bm_portal_config *pcfg;
 	struct resource *addr_phys[2];
 	void __iomem *va;
-	int irq, cpu;
+	int irq, cpu, err, i;
+
+	err = bman_is_probed();
+	if (!err)
+		return -EPROBE_DEFER;
+	if (err < 0) {
+		dev_err(&pdev->dev, "failing probe due to bman probe error\n");
+		return -ENODEV;
+	}
 
 	pcfg = devm_kmalloc(dev, sizeof(*pcfg), GFP_KERNEL);
-	if (!pcfg)
+	if (!pcfg) {
+		__bman_portals_probed = -1;
 		return -ENOMEM;
+	}
 
 	pcfg->dev = dev;
 
@@ -104,14 +123,14 @@ static int bman_portal_probe(struct platform_device *pdev)
 					     DPAA_PORTAL_CE);
 	if (!addr_phys[0]) {
 		dev_err(dev, "Can't get %pOF property 'reg::CE'\n", node);
-		return -ENXIO;
+		goto err_ioremap1;
 	}
 
 	addr_phys[1] = platform_get_resource(pdev, IORESOURCE_MEM,
 					     DPAA_PORTAL_CI);
 	if (!addr_phys[1]) {
 		dev_err(dev, "Can't get %pOF property 'reg::CI'\n", node);
-		return -ENXIO;
+		goto err_ioremap1;
 	}
 
 	pcfg->cpu = -1;
@@ -119,11 +138,18 @@ static int bman_portal_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 0);
 	if (irq <= 0) {
 		dev_err(dev, "Can't get %pOF IRQ'\n", node);
-		return -ENXIO;
+		goto err_ioremap1;
 	}
 	pcfg->irq = irq;
 
-	va = ioremap_prot(addr_phys[0]->start, resource_size(addr_phys[0]), 0);
+#ifdef CONFIG_PPC
+	/* PPC requires a cacheable/non-coherent mapping of the portal */
+	va = ioremap_prot(addr_phys[0]->start, resource_size(addr_phys[0]),
+			  (pgprot_val(PAGE_KERNEL) & ~_PAGE_COHERENT));
+#else
+	/* For ARM we can use write combine mapping. */
+	va = ioremap_wc(addr_phys[0]->start, resource_size(addr_phys[0]));
+#endif
 	if (!va) {
 		dev_err(dev, "ioremap::CE failed\n");
 		goto err_ioremap1;
@@ -131,8 +157,7 @@ static int bman_portal_probe(struct platform_device *pdev)
 
 	pcfg->addr_virt[DPAA_PORTAL_CE] = va;
 
-	va = ioremap_prot(addr_phys[1]->start, resource_size(addr_phys[1]),
-			  _PAGE_GUARDED | _PAGE_NO_CACHE);
+	va = ioremap(addr_phys[1]->start, resource_size(addr_phys[1]));
 	if (!va) {
 		dev_err(dev, "ioremap::CI failed\n");
 		goto err_ioremap2;
@@ -149,6 +174,9 @@ static int bman_portal_probe(struct platform_device *pdev)
 	}
 
 	cpumask_set_cpu(cpu, &portal_cpus);
+	if (!__bman_portals_probed &&
+	    cpumask_weight(&portal_cpus) == num_online_cpus())
+		__bman_portals_probed = 1;
 	spin_unlock(&bman_lock);
 	pcfg->cpu = cpu;
 
@@ -161,6 +189,22 @@ static int bman_portal_probe(struct platform_device *pdev)
 	if (!cpu_online(cpu))
 		bman_offline_cpu(cpu);
 
+	if (__bman_portals_probed == 1 && bman_requires_cleanup()) {
+		/*
+		 * BMan wasn't reset prior to boot (Kexec for example)
+		 * Empty all the buffer pools so they are in reset state
+		 */
+		for (i = 0; i < BM_POOL_MAX; i++) {
+			err =  bm_shutdown_pool(i);
+			if (err) {
+				dev_err(dev, "Failed to shutdown bpool %d\n",
+					i);
+				goto err_portal_init;
+			}
+		}
+		bman_done_cleanup();
+	}
+
 	return 0;
 
 err_portal_init:
@@ -168,6 +212,8 @@ err_portal_init:
 err_ioremap2:
 	iounmap(pcfg->addr_virt[DPAA_PORTAL_CE]);
 err_ioremap1:
+	 __bman_portals_probed = -1;
+
 	return -ENXIO;
 }
 

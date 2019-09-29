@@ -1241,6 +1241,14 @@ static int ipsec_esp(struct talitos_edesc *edesc, struct aead_request *areq,
 	ret = talitos_sg_map_ext(dev, areq->src, cryptlen, edesc, &desc->ptr[4],
 				 sg_count, areq->assoclen, tbl_off, elen);
 
+	/*
+	 * In case of SEC 2.x+, cipher in len must include only the ciphertext,
+	 * while extent is used for ICV len.
+	 */
+	if ((edesc->desc.hdr & DESC_HDR_TYPE_IPSEC_ESP) &&
+	    (desc->hdr & DESC_HDR_MODE1_MDEU_CICV))
+		desc->ptr[4].len = cpu_to_be16(cryptlen);
+
 	if (ret > 1) {
 		tbl_off += ret;
 		sync_needed = true;

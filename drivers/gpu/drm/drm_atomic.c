@@ -30,6 +30,7 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_mode.h>
 #include <drm/drm_print.h>
+#include <drm/drm_writeback.h>
 #include <linux/sync_file.h>
 
 #include "drm_crtc_internal.h"
@@ -323,6 +324,35 @@ static s32 __user *get_out_fence_for_crtc(struct drm_atomic_state *state,
 
 	fence_ptr = state->crtcs[drm_crtc_index(crtc)].out_fence_ptr;
 	state->crtcs[drm_crtc_index(crtc)].out_fence_ptr = NULL;
+
+	return fence_ptr;
+}
+
+static int set_out_fence_for_connector(struct drm_atomic_state *state,
+					struct drm_connector *connector,
+					s32 __user *fence_ptr)
+{
+	unsigned int index = drm_connector_index(connector);
+
+	if (!fence_ptr)
+		return 0;
+
+	if (put_user(-1, fence_ptr))
+		return -EFAULT;
+
+	state->connectors[index].out_fence_ptr = fence_ptr;
+
+	return 0;
+}
+
+static s32 __user *get_out_fence_for_connector(struct drm_atomic_state *state,
+					       struct drm_connector *connector)
+{
+	unsigned int index = drm_connector_index(connector);
+	s32 __user *fence_ptr;
+
+	fence_ptr = state->connectors[index].out_fence_ptr;
+	state->connectors[index].out_fence_ptr = NULL;
 
 	return fence_ptr;
 }
@@ -646,6 +676,52 @@ static void drm_atomic_crtc_print_state(struct drm_printer *p,
 
 	if (crtc->funcs->atomic_print_state)
 		crtc->funcs->atomic_print_state(p, state);
+}
+
+/**
+ * drm_atomic_connector_check - check connector state
+ * @connector: connector to check
+ * @state: connector state to check
+ *
+ * Provides core sanity checks for connector state.
+ *
+ * RETURNS:
+ * Zero on success, error code on failure
+ */
+static int drm_atomic_connector_check(struct drm_connector *connector,
+		struct drm_connector_state *state)
+{
+	struct drm_crtc_state *crtc_state;
+	struct drm_writeback_job *writeback_job = state->writeback_job;
+
+	if ((connector->connector_type != DRM_MODE_CONNECTOR_WRITEBACK) ||
+	    !writeback_job)
+		return 0;
+
+	if (writeback_job->fb && !state->crtc) {
+		DRM_DEBUG_ATOMIC("[CONNECTOR:%d:%s] framebuffer without CRTC\n",
+				 connector->base.id, connector->name);
+		return -EINVAL;
+	}
+
+	if (state->crtc)
+		crtc_state = drm_atomic_get_existing_crtc_state(state->state,
+								state->crtc);
+
+	if (writeback_job->fb && !crtc_state->active) {
+		DRM_DEBUG_ATOMIC("[CONNECTOR:%d:%s] has framebuffer, but [CRTC:%d] is off\n",
+				 connector->base.id, connector->name,
+				 state->crtc->base.id);
+		return -EINVAL;
+	}
+
+	if (writeback_job->out_fence && !writeback_job->fb) {
+		DRM_DEBUG_ATOMIC("[CONNECTOR:%d:%s] requesting out-fence without framebuffer\n",
+				 connector->base.id, connector->name);
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 /**
@@ -1206,6 +1282,17 @@ static int drm_atomic_connector_set_property(struct drm_connector *connector,
 		 */
 		if (state->link_status != DRM_LINK_STATUS_GOOD)
 			state->link_status = val;
+	} else if (property == config->writeback_fb_id_property) {
+		struct drm_framebuffer *fb = drm_framebuffer_lookup(dev, val);
+		int ret = drm_atomic_set_writeback_fb_for_connector(state, fb);
+		if (fb)
+			drm_framebuffer_unreference(fb);
+		return ret;
+	} else if (property == config->writeback_out_fence_ptr_property) {
+		s32 __user *fence_ptr = u64_to_user_ptr(val);
+
+		return set_out_fence_for_connector(state->state, connector,
+						   fence_ptr);
 	} else if (property == config->aspect_ratio_property) {
 		state->picture_aspect_ratio = val;
 	} else if (property == connector->scaling_mode_property) {
@@ -1285,6 +1372,11 @@ drm_atomic_connector_get_property(struct drm_connector *connector,
 		*val = state->tv.hue;
 	} else if (property == config->link_status_property) {
 		*val = state->link_status;
+	} else if (property == config->writeback_fb_id_property) {
+		/* Writeback framebuffer is one-shot, write and forget */
+		*val = 0;
+	} else if (property == config->writeback_out_fence_ptr_property) {
+		*val = 0;
 	} else if (property == config->aspect_ratio_property) {
 		*val = state->picture_aspect_ratio;
 	} else if (property == connector->scaling_mode_property) {
@@ -1498,6 +1590,75 @@ drm_atomic_set_crtc_for_connector(struct drm_connector_state *conn_state,
 }
 EXPORT_SYMBOL(drm_atomic_set_crtc_for_connector);
 
+/*
+ * drm_atomic_get_writeback_job - return or allocate a writeback job
+ * @conn_state: Connector state to get the job for
+ *
+ * Writeback jobs have a different lifetime to the atomic state they are
+ * associated with. This convenience function takes care of allocating a job
+ * if there isn't yet one associated with the connector state, otherwise
+ * it just returns the existing job.
+ *
+ * Returns: The writeback job for the given connector state
+ */
+static struct drm_writeback_job *
+drm_atomic_get_writeback_job(struct drm_connector_state *conn_state)
+{
+	WARN_ON(conn_state->connector->connector_type !=
+		DRM_MODE_CONNECTOR_WRITEBACK);
+
+	if (!conn_state->writeback_job)
+		conn_state->writeback_job =
+			kzalloc(sizeof(*conn_state->writeback_job), GFP_KERNEL);
+
+	return conn_state->writeback_job;
+}
+
+/**
+ * drm_atomic_set_writeback_fb_for_connector - set writeback framebuffer
+ * @conn_state: atomic state object for the connector
+ * @fb: fb to use for the connector
+ *
+ * This is used to set the framebuffer for a writeback connector, which outputs
+ * to a buffer instead of an actual physical connector.
+ * Changing the assigned framebuffer requires us to grab a reference to the new
+ * fb and drop the reference to the old fb, if there is one. This function
+ * takes care of all these details besides updating the pointer in the
+ * state object itself.
+ *
+ * Note: The only way conn_state can already have an fb set is if the commit
+ * sets the property more than once.
+ *
+ * See also: drm_writeback_connector_init()
+ *
+ * Returns: 0 on success
+ */
+int drm_atomic_set_writeback_fb_for_connector(
+		struct drm_connector_state *conn_state,
+		struct drm_framebuffer *fb)
+{
+	struct drm_writeback_job *job =
+		drm_atomic_get_writeback_job(conn_state);
+	if (!job)
+		return -ENOMEM;
+
+	if (job->fb)
+		drm_framebuffer_unreference(job->fb);
+	if (fb)
+		drm_framebuffer_reference(fb);
+	job->fb = fb;
+
+	if (fb)
+		DRM_DEBUG_ATOMIC("Set [FB:%d] for connector state %p\n",
+				 fb->base.id, conn_state);
+	else
+		DRM_DEBUG_ATOMIC("Set [NOFB] for connector state %p\n",
+				 conn_state);
+
+	return 0;
+}
+EXPORT_SYMBOL(drm_atomic_set_writeback_fb_for_connector);
+
 /**
  * drm_atomic_add_affected_connectors - add connectors for crtc
  * @state: atomic state
@@ -1616,6 +1777,8 @@ int drm_atomic_check_only(struct drm_atomic_state *state)
 	struct drm_plane_state *plane_state;
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *crtc_state;
+	struct drm_connector *conn;
+	struct drm_connector_state *conn_state;
 	int i, ret = 0;
 
 	DRM_DEBUG_ATOMIC("checking %p\n", state);
@@ -1634,6 +1797,15 @@ int drm_atomic_check_only(struct drm_atomic_state *state)
 		if (ret) {
 			DRM_DEBUG_ATOMIC("[CRTC:%d:%s] atomic core check failed\n",
 					 crtc->base.id, crtc->name);
+			return ret;
+		}
+	}
+
+	for_each_connector_in_state(state, conn, conn_state, i) {
+		ret = drm_atomic_connector_check(conn, conn_state);
+		if (ret) {
+			DRM_DEBUG_ATOMIC("[CONNECTOR:%d:%s] atomic core check failed\n",
+					 conn->base.id, conn->name);
 			return ret;
 		}
 	}
@@ -2070,7 +2242,7 @@ static int setup_out_fence(struct drm_out_fence_state *fence_state,
 	return 0;
 }
 
-static int prepare_crtc_signaling(struct drm_device *dev,
+static int prepare_signaling(struct drm_device *dev,
 				  struct drm_atomic_state *state,
 				  struct drm_mode_atomic *arg,
 				  struct drm_file *file_priv,
@@ -2079,6 +2251,8 @@ static int prepare_crtc_signaling(struct drm_device *dev,
 {
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *crtc_state;
+	struct drm_connector *conn;
+	struct drm_connector_state *conn_state;
 	int i, c = 0, ret;
 
 	if (arg->flags & DRM_MODE_ATOMIC_TEST_ONLY)
@@ -2151,14 +2325,51 @@ static int prepare_crtc_signaling(struct drm_device *dev,
 	if (c == 0 && (arg->flags & DRM_MODE_PAGE_FLIP_EVENT))
 		return -EINVAL;
 
+	for_each_connector_in_state(state, conn, conn_state, i) {
+		struct drm_writeback_job *job;
+		struct drm_out_fence_state *f;
+		struct dma_fence *fence;
+		s32 __user *fence_ptr;
+
+		fence_ptr = get_out_fence_for_connector(state, conn);
+		if (!fence_ptr)
+			continue;
+
+		job = drm_atomic_get_writeback_job(conn_state);
+		if (!job)
+			return -ENOMEM;
+
+		f = krealloc(*fence_state, sizeof(**fence_state) *
+			     (*num_fences + 1), GFP_KERNEL);
+		if (!f)
+			return -ENOMEM;
+
+		memset(&f[*num_fences], 0, sizeof(*f));
+
+		f[*num_fences].out_fence_ptr = fence_ptr;
+		*fence_state = f;
+
+		fence = drm_writeback_get_out_fence((struct drm_writeback_connector *)conn);
+		if (!fence)
+			return -ENOMEM;
+
+		ret = setup_out_fence(&f[(*num_fences)++], fence);
+		if (ret) {
+			dma_fence_put(fence);
+			return ret;
+		}
+
+		job->out_fence = fence;
+	}
+
 	return 0;
 }
 
-static void complete_crtc_signaling(struct drm_device *dev,
-				    struct drm_atomic_state *state,
-				    struct drm_out_fence_state *fence_state,
-				    unsigned int num_fences,
-				    bool install_fds)
+static void complete_signaling(struct drm_device *dev,
+			       struct drm_atomic_state *state,
+			       struct drm_out_fence_state *fence_state,
+			       unsigned int num_fences,
+			       bool install_fds)
 {
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *crtc_state;
@@ -2337,8 +2548,8 @@ retry:
 		drm_mode_object_put(obj);
 	}
 
-	ret = prepare_crtc_signaling(dev, state, arg, file_priv, &fence_state,
-				     &num_fences);
+	ret = prepare_signaling(dev, state, arg, file_priv, &fence_state,
+				&num_fences);
 	if (ret)
 		goto out;
 
@@ -2356,7 +2567,7 @@ retry:
 out:
 	drm_atomic_clean_old_fb(dev, plane_mask, ret);
 
-	complete_crtc_signaling(dev, state, fence_state, num_fences, !ret);
+	complete_signaling(dev, state, fence_state, num_fences, !ret);
 
 	if (ret == -EDEADLK) {
 		drm_atomic_state_clear(state);

@@ -161,6 +161,32 @@
 
 /* Bit fields */
 
+/* Global SoC Bus Configuration Register 0 */
+#define AXI3_CACHE_TYPE_AW		0x8 /* write allocate */
+#define AXI3_CACHE_TYPE_AR		0x4 /* read allocate */
+#define AXI3_CACHE_TYPE_SNP		0x2 /* cacheable */
+#define AXI3_CACHE_TYPE_BUF		0x1 /* bufferable */
+#define DWC3_GSBUSCFG0_DATARD_SHIFT	28
+#define DWC3_GSBUSCFG0_DESCRD_SHIFT	24
+#define DWC3_GSBUSCFG0_DATAWR_SHIFT	20
+#define DWC3_GSBUSCFG0_DESCWR_SHIFT	16
+#define DWC3_GSBUSCFG0_SNP_MASK		0xffff0000
+#define DWC3_GSBUSCFG0_DATABIGEND	(1 << 11)
+#define DWC3_GSBUSCFG0_DESCBIGEND	(1 << 10)
+#define DWC3_GSBUSCFG0_INCR256BRSTENA	(1 << 7) /* INCR256 burst */
+#define DWC3_GSBUSCFG0_INCR128BRSTENA	(1 << 6) /* INCR128 burst */
+#define DWC3_GSBUSCFG0_INCR64BRSTENA	(1 << 5) /* INCR64 burst */
+#define DWC3_GSBUSCFG0_INCR32BRSTENA	(1 << 4) /* INCR32 burst */
+#define DWC3_GSBUSCFG0_INCR16BRSTENA	(1 << 3) /* INCR16 burst */
+#define DWC3_GSBUSCFG0_INCR8BRSTENA	(1 << 2) /* INCR8 burst */
+#define DWC3_GSBUSCFG0_INCR4BRSTENA	(1 << 1) /* INCR4 burst */
+#define DWC3_GSBUSCFG0_INCRBRSTENA	(1 << 0) /* undefined length enable */
+#define DWC3_GSBUSCFG0_INCRBRST_MASK	0xff
+
+/* Global SoC Bus Configuration Register 1 */
+#define DWC3_GSBUSCFG1_1KPAGEENA	(1 << 12) /* 1K page boundary enable */
+#define DWC3_GSBUSCFG1_PTRANSLIMIT_MASK	0xf00
+
 /* Global Debug Queue/FIFO Space Available Register */
 #define DWC3_GDBGFIFOSPACE_NUM(n)	((n) & 0x1f)
 #define DWC3_GDBGFIFOSPACE_TYPE(n)	(((n) << 5) & 0x1e0)
@@ -204,6 +230,9 @@
 #define DWC3_GCTL_U2EXIT_LFPS		BIT(2)
 #define DWC3_GCTL_GBLHIBERNATIONEN	BIT(1)
 #define DWC3_GCTL_DSBLCLKGTNG		BIT(0)
+
+/* Global User Control Register */
+#define DWC3_GUCTL_HSTINAUTORETRY	BIT(14)
 
 /* Global User Control 1 Register */
 #define DWC3_GUCTL1_TX_IPGAP_LINECHECK_DIS	BIT(28)
@@ -476,6 +505,14 @@
 #define DWC3_DEV_IMOD_COUNT_MASK	(0xffff << 16)
 #define DWC3_DEV_IMOD_INTERVAL_SHIFT	0
 #define DWC3_DEV_IMOD_INTERVAL_MASK	(0xffff << 0)
+
+/* Partial XHCI Register and Bit fields for quirk */
+#define XHCI_HCSPARAMS1		0x4
+#define XHCI_PORTSC_BASE	0x400
+#define PORT_POWER			(1 << 9)
+#define HCS_MAX_PORTS(p)	(((p) >> 24) & 0x7f)
+#define XHCI_HC_LENGTH(p)	(((p)>>00)&0x00ff)
+#define HC_LENGTH(p)		XHCI_HC_LENGTH(p)
 
 /* Structures */
 
@@ -788,6 +825,7 @@ struct dwc3_scratchpad_array {
  * @regs: base address for our registers
  * @regs_size: address space size
  * @fladj: frame length adjustment
+ * @incrx_type: INCR burst type adjustment
  * @irq_gadget: peripheral controller's IRQ number
  * @nr_scratch: number of scratch buffers
  * @u1u2: only used on revisions <1.83a for workaround
@@ -843,6 +881,7 @@ struct dwc3_scratchpad_array {
  * @setup_packet_pending: true when there's a Setup Packet in FIFO. Workaround
  * @three_stage_setup: set if we perform a three phase setup
  * @usb3_lpm_capable: set if hadrware supports Link Power Management
+ * @dma_coherent: set if hadrware supports DMA snoop
  * @disable_scramble_quirk: set if we enable the disable scramble quirk
  * @u2exit_lfps_quirk: set if we enable u2exit lfps quirk
  * @u2ss_inp3_quirk: set if we enable P3 OK for U2/SS Inactive quirk
@@ -869,6 +908,13 @@ struct dwc3_scratchpad_array {
  * 	1	- -3.5dB de-emphasis
  * 	2	- No de-emphasis
  * 	3	- Reserved
+ * @disable_devinit_u1u2_quirk: disable device-initiated U1/U2 request.
+ * @quirk_reverse_in_out: prevent tx fifo reverse the data direction
+ * @quirk_stop_transfer_in_block: prevent block transmission from being
+ *				interrupted
+ * @quirk_stop_ep_in_u1: replace stop commad with disable slot command
+ * @host-vbus-glitches: set to avoid vbus glitch during
+ *                      xhci reset.
  * @imod_interval: set the interrupt moderation interval in 250ns
  *                 increments or 0 to disable.
  */
@@ -921,6 +967,12 @@ struct dwc3 {
 	enum usb_phy_interface	hsphy_mode;
 
 	u32			fladj;
+	/*
+	 * For INCR burst type.
+	 * First field: for undefined length INCR burst type enable.
+	 * Second field: for INCRx burst type enable
+	 */
+	u32			incrx_type[2];
 	u32			irq_gadget;
 	u32			nr_scratch;
 	u32			u1u2;
@@ -1005,6 +1057,7 @@ struct dwc3 {
 	unsigned		setup_packet_pending:1;
 	unsigned		three_stage_setup:1;
 	unsigned		usb3_lpm_capable:1;
+	unsigned		dma_coherent:1;
 
 	unsigned		disable_scramble_quirk:1;
 	unsigned		u2exit_lfps_quirk:1;
@@ -1024,6 +1077,11 @@ struct dwc3 {
 
 	unsigned		tx_de_emphasis_quirk:1;
 	unsigned		tx_de_emphasis:2;
+	unsigned		disable_devinit_u1u2_quirk:1;
+	unsigned                quirk_reverse_in_out:1;
+	unsigned                quirk_stop_transfer_in_block:1;
+	unsigned                quirk_stop_ep_in_u1:1;
+	unsigned		host_vbus_glitches:1;
 
 	u16			imod_interval;
 };

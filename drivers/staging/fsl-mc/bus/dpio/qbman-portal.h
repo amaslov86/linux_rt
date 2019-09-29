@@ -1,38 +1,20 @@
+/* SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause) */
 /*
  * Copyright (C) 2014-2016 Freescale Semiconductor, Inc.
- * Copyright 2016 NXP
+ * Copyright 2016-2019 NXP
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- *     * Neither the name of Freescale Semiconductor nor the
- *       names of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written permission.
- *
- * ALTERNATIVELY, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") as published by the Free Software
- * Foundation, either version 2 of that License or (at your option) any
- * later version.
- *
- * THIS SOFTWARE IS PROVIDED BY Freescale Semiconductor ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL Freescale Semiconductor BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #ifndef __FSL_QBMAN_PORTAL_H
 #define __FSL_QBMAN_PORTAL_H
 
 #include "../../include/dpaa2-fd.h"
+
+#define QMAN_REV_4000   0x04000000
+#define QMAN_REV_4100   0x04010000
+#define QMAN_REV_4101   0x04010001
+#define QMAN_REV_5000   0x05000000
+
+#define QMAN_REV_MASK   0xffff0000
 
 struct dpaa2_dq;
 struct qbman_swp;
@@ -40,7 +22,7 @@ struct qbman_swp;
 /* qbman software portal descriptor structure */
 struct qbman_swp_desc {
 	void *cena_bar; /* Cache-enabled portal base address */
-	void *cinh_bar; /* Cache-inhibited portal base address */
+	void __iomem *cinh_bar; /* Cache-inhibited portal base address */
 	u32 qman_version;
 };
 
@@ -57,8 +39,8 @@ struct qbman_pull_desc {
 	u8 numf;
 	u8 tok;
 	u8 reserved;
-	u32 dq_src;
-	u64 rsp_addr;
+	__le32 dq_src;
+	__le64 rsp_addr;
 	u64 rsp_addr_virt;
 	u8 padding[40];
 };
@@ -95,17 +77,17 @@ enum qbman_pull_type_e {
 struct qbman_eq_desc {
 	u8 verb;
 	u8 dca;
-	u16 seqnum;
-	u16 orpid;
-	u16 reserved1;
-	u32 tgtid;
-	u32 tag;
-	u16 qdbin;
+	__le16 seqnum;
+	__le16 orpid;
+	__le16 reserved1;
+	__le32 tgtid;
+	__le32 tag;
+	__le16 qdbin;
 	u8 qpri;
 	u8 reserved[3];
 	u8 wae;
 	u8 rspid;
-	u64 rsp_addr;
+	__le64 rsp_addr;
 	u8 fd[32];
 };
 
@@ -113,9 +95,9 @@ struct qbman_eq_desc {
 struct qbman_release_desc {
 	u8 verb;
 	u8 reserved;
-	u16 bpid;
-	u32 reserved2;
-	u64 buf[7];
+	__le16 bpid;
+	__le32 reserved2;
+	__le64 buf[7];
 };
 
 /* Management command result codes */
@@ -127,13 +109,18 @@ struct qbman_release_desc {
 /* portal data structure */
 struct qbman_swp {
 	const struct qbman_swp_desc *desc;
-	void __iomem *addr_cena;
+	void *addr_cena;
 	void __iomem *addr_cinh;
 
 	/* Management commands */
 	struct {
 		u32 valid_bit; /* 0x00 or 0x80 */
 	} mc;
+
+	/* Management response */
+	struct {
+		u32 valid_bit; /* 0x00 or 0x80 */
+	} mr;
 
 	/* Push dequeues */
 	u32 sdq;
@@ -187,6 +174,9 @@ int qbman_result_has_new_result(struct qbman_swp *p, const struct dpaa2_dq *dq);
 
 void qbman_eq_desc_clear(struct qbman_eq_desc *d);
 void qbman_eq_desc_set_no_orp(struct qbman_eq_desc *d, int respond_success);
+void qbman_eq_desc_set_orp(struct qbman_eq_desc *d, int respond_success,
+			   u16 oprid, u16 seqnum, int incomplete);
+void qbman_eq_desc_set_orp_hole(struct qbman_eq_desc *d, u16 oprid, u16 seqnum);
 void qbman_eq_desc_set_token(struct qbman_eq_desc *d, u8 token);
 void qbman_eq_desc_set_fq(struct qbman_eq_desc *d, u32 fqid);
 void qbman_eq_desc_set_qd(struct qbman_eq_desc *d, u32 qdid,
@@ -194,6 +184,8 @@ void qbman_eq_desc_set_qd(struct qbman_eq_desc *d, u32 qdid,
 
 int qbman_swp_enqueue(struct qbman_swp *p, const struct qbman_eq_desc *d,
 		      const struct dpaa2_fd *fd);
+
+int qbman_orp_drop(struct qbman_swp *s, u16 orpid, u16 seqnum);
 
 void qbman_release_desc_clear(struct qbman_release_desc *d);
 void qbman_release_desc_set_bpid(struct qbman_release_desc *d, u16 bpid);
@@ -453,7 +445,7 @@ static inline int qbman_swp_CDAN_set_context_enable(struct qbman_swp *s,
 static inline void *qbman_swp_mc_complete(struct qbman_swp *swp, void *cmd,
 					  u8 cmd_verb)
 {
-	int loopvar = 1000;
+	int loopvar = 2000;
 
 	qbman_swp_mc_submit(swp, cmd, cmd_verb);
 
@@ -465,5 +457,63 @@ static inline void *qbman_swp_mc_complete(struct qbman_swp *swp, void *cmd,
 
 	return cmd;
 }
+
+/* Query APIs */
+struct qbman_fq_query_np_rslt {
+	u8 verb;
+	u8 rslt;
+	u8 st1;
+	u8 st2;
+	u8 reserved[2];
+	__le16 od1_sfdr;
+	__le16 od2_sfdr;
+	__le16 od3_sfdr;
+	__le16 ra1_sfdr;
+	__le16 ra2_sfdr;
+	__le32 pfdr_hptr;
+	__le32 pfdr_tptr;
+	__le32 frm_cnt;
+	__le32 byte_cnt;
+	__le16 ics_surp;
+	u8 is;
+	u8 reserved2[29];
+};
+
+int qbman_fq_query_state(struct qbman_swp *s, u32 fqid,
+			 struct qbman_fq_query_np_rslt *r);
+u32 qbman_fq_state_frame_count(const struct qbman_fq_query_np_rslt *r);
+u32 qbman_fq_state_byte_count(const struct qbman_fq_query_np_rslt *r);
+
+struct qbman_bp_query_rslt {
+	u8 verb;
+	u8 rslt;
+	u8 reserved[4];
+	u8 bdi;
+	u8 state;
+	__le32 fill;
+	__le32 hdotr;
+	__le16 swdet;
+	__le16 swdxt;
+	__le16 hwdet;
+	__le16 hwdxt;
+	__le16 swset;
+	__le16 swsxt;
+	__le16 vbpid;
+	__le16 icid;
+	__le64 bpscn_addr;
+	__le64 bpscn_ctx;
+	__le16 hw_targ;
+	u8 dbe;
+	u8 reserved2;
+	u8 sdcnt;
+	u8 hdcnt;
+	u8 sscnt;
+	u8 reserved3[9];
+};
+
+int qbman_bp_query(struct qbman_swp *s, u16 bpid,
+		   struct qbman_bp_query_rslt *r);
+
+u32 qbman_bp_info_num_free_bufs(struct qbman_bp_query_rslt *a);
 
 #endif /* __FSL_QBMAN_PORTAL_H */

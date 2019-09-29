@@ -76,7 +76,7 @@ static char *check[] = {
 	"khazad", "wp512", "wp384", "wp256", "tnepres", "xeta",  "fcrypt",
 	"camellia", "seed", "salsa20", "rmd128", "rmd160", "rmd256", "rmd320",
 	"lzo", "cts", "zlib", "sha3-224", "sha3-256", "sha3-384", "sha3-512",
-	NULL
+	"rsa", NULL
 };
 
 struct tcrypt_result {
@@ -355,11 +355,13 @@ static void test_aead_speed(const char *algo, int enc, unsigned int secs,
 					       iv);
 			aead_request_set_ad(req, aad_size);
 
-			if (secs)
+			if (secs) {
 				ret = test_aead_jiffies(req, enc, *b_size,
 							secs);
-			else
+				cond_resched();
+			} else {
 				ret = test_aead_cycles(req, enc, *b_size);
+			}
 
 			if (ret) {
 				pr_err("%s() failed return code=%d\n", e, ret);
@@ -736,12 +738,14 @@ static void test_ahash_speed_common(const char *algo, unsigned int secs,
 
 		ahash_request_set_crypt(req, sg, output, speed[i].plen);
 
-		if (secs)
+		if (secs) {
 			ret = test_ahash_jiffies(req, speed[i].blen,
 						 speed[i].plen, output, secs);
-		else
+			cond_resched();
+		} else {
 			ret = test_ahash_cycles(req, speed[i].blen,
 						speed[i].plen, output);
+		}
 
 		if (ret) {
 			pr_err("hashing failed ret=%d\n", ret);
@@ -959,12 +963,14 @@ static void test_skcipher_speed(const char *algo, int enc, unsigned int secs,
 
 			skcipher_request_set_crypt(req, sg, sg, *b_size, iv);
 
-			if (secs)
+			if (secs) {
 				ret = test_acipher_jiffies(req, enc,
 							   *b_size, secs);
-			else
+				cond_resched();
+			} else {
 				ret = test_acipher_cycles(req, enc,
 							  *b_size);
+			}
 
 			if (ret) {
 				pr_err("%s() failed flags=%x\n", e,
@@ -1336,6 +1342,10 @@ static int do_test(const char *alg, u32 type, u32 mask, int m)
 		ret += tcrypt_test("hmac(sha3-512)");
 		break;
 
+	case 115:
+		ret += tcrypt_test("rsa");
+		break;
+
 	case 150:
 		ret += tcrypt_test("ansi_cprng");
 		break;
@@ -1396,6 +1406,9 @@ static int do_test(const char *alg, u32 type, u32 mask, int m)
 		break;
 	case 190:
 		ret += tcrypt_test("authenc(hmac(sha512),cbc(des3_ede))");
+		break;
+	case 191:
+		ret += tcrypt_test("tls10(hmac(sha1),cbc(aes))");
 		break;
 	case 200:
 		test_cipher_speed("ecb(aes)", ENCRYPT, sec, NULL, 0,
